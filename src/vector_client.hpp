@@ -42,6 +42,10 @@ public:
 
     // --- one-shot commands (most need behavior control, see ControlSession) ---
     bool say(const std::string& text, float duration_scalar = 1.0f, float pitch = 0.0f);
+    // Stop whatever say() is doing right now (someone pressed his back button to interrupt him).
+    void cancelSay();
+    // Camera intrinsics (pixels) - used to turn a face's position in the image into a bearing.
+    bool cameraConfig(float& focal_x, float& center_x, float& fov_x_deg);
     bool setHeadDeg(float deg);         // -22 .. 45
     bool setLift(float fraction);       // 0 (down) .. 1 (up)
     bool turnDeg(float deg);            // + = left
@@ -103,6 +107,8 @@ private:
     RobotConfig cfg_;
     std::shared_ptr<grpc::Channel> channel_;
     std::unique_ptr<vpb::ExternalInterface::Stub> stub_;
+    std::mutex say_mu_;
+    grpc::ClientContext* say_ctx_ = nullptr;
     std::mutex streams_mu_;
     std::set<grpc::ClientContext*> streams_;
 };

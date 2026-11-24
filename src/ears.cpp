@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "whisper.h"
@@ -117,8 +118,14 @@ Ears::~Ears() {
 
 bool Ears::start(std::function<void(const Heard&)> on_heard, std::string* err) {
     whisper_log_set([](enum ggml_log_level, const char*, void*) {}, nullptr);
-    auto cp = whisper_context_default_params();
+    auto cp = whisper_context_default_params();  // use_gpu is on: GPU if this build has one
+    cp.use_gpu = std::getenv("MBOT_WHISPER_CPU") == nullptr;
     wctx_ = whisper_init_from_file_with_params(model_path_.c_str(), cp);
+    if (!wctx_ && cp.use_gpu) {  // no usable GPU (or out of memory): the CPU it is
+        std::fprintf(stderr, "[ears] speech-to-text couldn't start on the GPU - using the CPU\n");
+        cp.use_gpu = false;
+        wctx_ = whisper_init_from_file_with_params(model_path_.c_str(), cp);
+    }
     if (!wctx_) {
         if (err) *err = "cannot load whisper model " + model_path_;
         return false;
@@ -361,6 +368,7 @@ void Ears::onFrame(const int16_t* s, size_t n, uint32_t rate) {
     if (rms > peak_.load()) peak_ = rms;
 
     if (isMuted()) {
+        if (dir_open_) { dir_->end(); dir_open_ = false; }
         in_speech_ = false;
         utter_.clear();
         pre_roll_.clear();
@@ -384,6 +392,7 @@ void Ears::onFrame(const int16_t* s, size_t n, uint32_t rate) {
             std::snprintf(b, sizeof b, "sound start (level %.0f, noise %.0f, threshold %.0f)", rms, floor, thresh);
             log(b);
             in_speech_ = true;
+            if (dir_ && dir_->connected()) { dir_->begin(); dir_open_ = true; }
             utter_ = pre_roll_;
             quiet_run_ = 0;
             rms_sum_ = 0;
@@ -400,9 +409,11 @@ void Ears::onFrame(const int16_t* s, size_t n, uint32_t rate) {
     bool too_long = utter_.size() > 16000 * 15;    // 15 s cap
     if (ended || too_long) {
         float secs = float(utter_.size()) / 16000.f;
+        DoaCapture cap;
+        if (dir_open_) { cap = dir_->end(); dir_open_ = false; }
         if (secs >= 0.9f) {  // includes the trailing quiet; real speech >= ~0.2 s
             std::lock_guard<std::mutex> lk(qmu_);
-            queue_.push_back({std::move(utter_), float(rms_sum_ / std::max(1, rms_n_))});
+            queue_.push_back({std::move(utter_), float(rms_sum_ / std::max(1, rms_n_)), std::move(cap)});
             if (queue_.size() > 4) queue_.pop_front();  // never fall far behind
             qcv_.notify_one();
         }
@@ -443,7 +454,7 @@ std::string Ears::transcribe(const std::vector<float>& pcm, float* no_speech) {
 
 void Ears::sttLoop() {
     while (running_) {
-        std::pair<std::vector<float>, float> item;
+        Pending item;
         {
             std::unique_lock<std::mutex> lk(qmu_);
             qcv_.wait_for(lk, std::chrono::milliseconds(200),
@@ -457,14 +468,14 @@ void Ears::sttLoop() {
             std::string path = save_dir_ + "/segment-" + std::to_string(save_n_++ % 10) + ".wav";
             saved_path = path;
             if (FILE* f = std::fopen(path.c_str(), "wb")) {
-                uint32_t n = uint32_t(item.first.size()), bytes = n * 2, rate = 16000, br = 32000;
+                uint32_t n = uint32_t(item.audio.size()), bytes = n * 2, rate = 16000, br = 32000;
                 uint16_t one = 1, bits = 16, align = 2;
                 uint32_t riff = 36 + bytes, fmtlen = 16;
                 std::fwrite("RIFF", 1, 4, f); std::fwrite(&riff, 4, 1, f); std::fwrite("WAVEfmt ", 1, 8, f);
                 std::fwrite(&fmtlen, 4, 1, f); std::fwrite(&one, 2, 1, f); std::fwrite(&one, 2, 1, f);
                 std::fwrite(&rate, 4, 1, f); std::fwrite(&br, 4, 1, f); std::fwrite(&align, 2, 1, f);
                 std::fwrite(&bits, 2, 1, f); std::fwrite("data", 1, 4, f); std::fwrite(&bytes, 4, 1, f);
-                for (float v : item.first) {
+                for (float v : item.audio) {
                     int16_t x = int16_t(std::clamp(v, -32768.f, 32767.f));
                     std::fwrite(&x, 2, 1, f);
                 }
@@ -474,20 +485,21 @@ void Ears::sttLoop() {
         }
         float no_speech = 0;
         auto t0 = std::chrono::steady_clock::now();
-        std::string text = transcribe(item.first, &no_speech);
+        std::string text = transcribe(item.audio, &no_speech);
         double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         char b[512];
         std::snprintf(b, sizeof b, "segment %.1fs level %.0f -> \"%s\" (no-speech %.2f, %.0f ms)",
-                      item.first.size() / 16000.0, item.second, text.c_str(), no_speech, ms);
+                      item.audio.size() / 16000.0, item.loudness, text.c_str(), no_speech, ms);
         log(b);
         if (text.empty() || isJunk(text)) { log("  dropped: empty/noise"); continue; }
         if (no_speech > 0.6f) { log("  dropped: whisper thinks it's not speech"); continue; }
         if (realWordCount(text) == 0) { log("  dropped: no real words (filler/garble)"); continue; }
         Heard h;
         h.text = text;
-        h.seconds = float(item.first.size()) / 16000.f;
-        h.loudness = item.second;
-        h.audio = std::make_shared<const std::vector<float>>(item.first);
+        h.seconds = float(item.audio.size()) / 16000.f;
+        h.loudness = item.loudness;
+        if (!item.dir.ch[0].empty()) h.doa = measureCapture(item.dir);
+        h.audio = std::make_shared<const std::vector<float>>(std::move(item.audio));
         if (on_heard_) on_heard_(h);
     }
 }

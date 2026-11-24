@@ -106,6 +106,10 @@ public:
 
     // ---- people ----
     void sawPerson(const std::string& name);    // face recognized in person
+    int64_t lastSeen(const std::string& name) const;  // unix time he last saw them in person (0 = never)
+    // The newest memory of `kind` about this person whose text starts with `prefix` ("" if none).
+    std::string latestMemory(const std::string& name, const std::string& kind, const std::string& prefix,
+                             int64_t* when = nullptr) const;
     void knowPerson(const std::string& name);   // known from conversation
     void learnFact(const std::string& person, const std::string& fact);
     // Remove facts about someone that turned out to be wrong ("there is no piano"). Returns how many.

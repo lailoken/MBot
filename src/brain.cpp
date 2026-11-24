@@ -37,6 +37,7 @@
 
 #include "config.hpp"
 #include "ears.hpp"
+#include "provision.hpp"
 #include "llm.hpp"
 #include "mind.hpp"
 #include "voice_id.hpp"
@@ -312,6 +313,11 @@ bool mentionsName(const std::string& text, const std::string& name) {
     return false;
 }
 
+// A face he saw and where (world bearing: his heading + the angle in the image; + = left).
+struct SeenFace { std::string who; float world = 0; bool frontal = false; std::chrono::steady_clock::time_point at{}; };
+// Where a piece of speech came from (world bearing) and how sure.
+struct SpeechDir { bool ok = false; float world = 0, conf = 0; };
+
 struct Stimulus {
     enum Kind { Speech, Face, Touch, Body, Intent, Idle, Typed } kind;
     std::string text;
@@ -363,13 +369,28 @@ public:
         for (auto& p : mind_.knownPeople()) std::printf("%s ", p.c_str());
         std::printf("\n[brain] feeling %s\n", mind_.mood().describe().c_str());
 
+        // Fetch what's missing, the first time it's needed: local models (background), the speech model (now).
+        {
+            std::vector<std::string> want = {opt_.vision_model, opt_.fast_model.empty() ? defaultLocalModel() : opt_.fast_model};
+            if (!opt_.model.empty() && opt_.model.rfind("claude", 0) != 0) want.push_back(opt_.model);
+            if (!opt_.reflect_model.empty() && opt_.reflect_model.rfind("claude", 0) != 0) want.push_back(opt_.reflect_model);
+            std::string url = opt_.vision_url;
+            std::thread([url, want] { ensureOllamaModels(url, want); }).detach();
+        }
+        if (!opt_.whisper_model.empty()) ensureModelFile(opt_.whisper_model, "speech model");
         if (!opt_.whisper_model.empty()) {
             bool tap = opt_.mic == "tap";
             bool pc = !tap && opt_.mic != "robot";
             std::string dev = (opt_.mic == "pc" || opt_.mic == "robot" || tap) ? "" : opt_.mic;
             ears_ = std::make_unique<Ears>(vec_.config().ip, opt_.mic_port, opt_.whisper_model,
                                            opt_.whisper_threads, pc, dev);
-            if (tap) ears_->setTapMode(9099);
+            if (tap) {
+                ears_->setTapMode(9099);
+                dir_model_.load(mind_dir_ + "/ears_direction.json");
+                dir_.start(vec_.config().ip, 9098);
+                ears_->setDirectionFinder(&dir_);
+                std::printf("[direction] where voices come from: %s\n", dir_model_.summary().c_str());
+            }
             std::string err;
             ears_->setLogger([this](const std::string& m) { earsLog(m); });
             if (opt_.save_ears) {  // opt-in: keep the last 10 heard segments as WAVs (debugging only)
@@ -410,6 +431,11 @@ public:
         }
 
         loadHush();
+        try {
+            std::ifstream af(mind_dir_ + "/ambient.json");
+            if (af) af >> places_;
+            if (!places_.is_object()) places_ = json::object();
+        } catch (...) { places_ = json::object(); }
         // A maintenance restart (an update to his mind) leaves no "I woke up" moment: touch <data>/quiet_restart first.
         {
             std::string qr = mind_dir_ + "/quiet_restart";
@@ -473,6 +499,24 @@ public:
 
             housekeeping();
             hushTick();
+            if (cam_fx_.load() <= 0 && now - last_cam_cfg_try_ > std::chrono::minutes(1)) {
+                last_cam_cfg_try_ = now;
+                float fx = 0, cx = 0, fov = 0;
+                if (vec_.cameraConfig(fx, cx, fov)) {
+                    cam_fx_ = fx;
+                    cam_cx_ = cx;
+                    std::printf("[eyes] camera: %.0f deg wide (focal %.0f px)\n", fov, fx);
+                }
+            }
+            ambientTick(now);
+            if (voice_dl_done_.exchange(false) && opt_.recognition) loadVoiceId();
+            if (!got) conversationTick(now);
+            if (turn_pending_.exchange(false) && !hushed()) {
+                last_turn_ = now;
+                float deg = turn_to_.load();
+                std::printf("[direction] turning %+.0f deg toward the voice\n", deg);
+                withBody([&] { return vec_.turnDeg(deg); });
+            }
             if (!on_charger_.load() && now - last_live_fetch_ > std::chrono::seconds(calib_ ? 12 : 20)) fetchLiveBatt();
             if (calib_ && now - last_calib_sample_ > std::chrono::seconds(15)) {
                 last_calib_sample_ = now;
@@ -628,6 +672,7 @@ private:
         if (cmd == "help" || cmd.empty())
             return "Maintenance commands (not remembered, not sent to his mind):\n"
                    "  /status                     minds, budget, spend, modes\n"
+                   "  /ears [reset]               direction of sound: status / relearn\n"
                    "  /recognition on|off         recognise people: voiceprints, face learning, portraits (default off)\n"
                    "  /quiet [min|off]            quiet time (default 120 min): sleeps on the charger, silent and still\n"
                    "  /models                     local models installed (Ollama)\n"
@@ -643,6 +688,16 @@ private:
                    "  /battery [calibrate]        battery now + curve; calibrate = run him flat once to learn the real curve\n"
                    "  /reflect                    consolidate memories (and dream, if asleep) now\n"
                    "Settings are saved in settings.json in his data folder and override the service flags.";
+        if (cmd == "ears" || cmd == "direction") {
+            if (arg == "reset") {
+                dir_model_.reset();
+                dir_model_.save();
+                return "forgot where voices come from; he relearns it from people talking while he sees their face";
+            }
+            return std::string("direction of sound: ") +
+                   (dir_.connected() ? "connected to the robot's raw mics" : "not connected (needs the robot's mictap with :9098)") +
+                   "\n" + dir_model_.summary() + "\n(/ears reset to start over)";
+        }
         if (cmd == "recognition") {
             if (arg.empty())
                 return std::string("recognising people: ") + (opt_.recognition ? "on" : "off") +
@@ -866,12 +921,15 @@ private:
         std::string text;
         std::vector<float> pcm;
         std::shared_ptr<const std::vector<float>> audio;
+        SpeechDir dir;
         {
             std::lock_guard<std::mutex> lk(speech_mu_);
             if (speech_buf_.empty() || Clock::now() - speech_at_ < std::chrono::milliseconds(900)) return;
             if (ears_ && ears_->hearingSpeech()) return;  // they're still talking
             text.swap(speech_buf_);
             pcm.swap(speech_pcm_);
+            dir = speech_dir_;
+            speech_dir_ = {};
             audio = std::move(speech_audio_);
             speech_audio_.reset();
         }
@@ -881,7 +939,7 @@ private:
             hush_note = " (You've been asked to be quiet / sleep: you're going to sleep on your charger for about 2 "
                         "hours now. Answer with at most a soft word or two, like \"Okay. Goodnight.\" - no actions.)";
         }
-        Stimulus st{Stimulus::Speech, text + mishearingNotes(text) + identifySpeaker(pcm, text) + hush_note, 5};
+        Stimulus st{Stimulus::Speech, text + mishearingNotes(text) + identifySpeaker(pcm, text, dir) + directionHint(dir) + hush_note, 5};
         st.audio = audio;
         push(st);
     }
@@ -906,7 +964,7 @@ private:
         return out;
     }
 
-    std::string identifySpeaker(const std::vector<float>& pcm, const std::string& text) {
+    std::string identifySpeaker(const std::vector<float>& pcm, const std::string& text, const SpeechDir& d) {
         if (!opt_.recognition || !voice_.ready() || pcm.size() < 32000) return "";  // under 2 s: too little voice to judge
         auto e = voice_.embed(pcm);
         if (e.empty()) return "";
@@ -928,12 +986,44 @@ private:
         auto clearOf = [](const std::vector<VoiceMatch>& r) {
             return !r.empty() && r[0].score >= 0.55f && (r.size() < 2 || r[0].score - r[1].score >= 0.15f);
         };
+        // Direction: whose face is where the voice came from (a strong clue, and lets him learn a voice even
+        // with several people in view); a voice from away from everyone visible is someone unseen.
+        std::string face_at_voice;
+        bool voice_off_faces = false;
+        if (d.ok && d.conf >= 0.45f) {
+            float best = 22.f, nearest = 999.f;
+            auto faces = recentFaces(std::chrono::seconds(3));
+            for (auto& f : faces) {
+                float diff = std::fabs(wrap180(f.world - d.world));
+                nearest = std::min(nearest, diff);
+                if (diff < best && isRealName(f.who)) { best = diff; face_at_voice = mind_.canonicalName(f.who); }
+            }
+            voice_off_faces = !faces.empty() && nearest > 35.f;
+        }
         auto ranks = prints_.rank(e);
         std::string effort = "low";
         if (ranks.size() >= 2 && (n_around >= 2 || !clearOf(ranks))) { ranks = carefulRank(pcm, e); effort = "high"; }
         bool clear = clearOf(ranks);
         std::string who, hint;
-        if (n_around == 1 && around.size() == 1) {  // only one person around: assume it's them...
+        auto scoreOf = [&](const std::string& n) {
+            for (auto& m : ranks) if (m.name == n) return m.score;
+            return 0.f;
+        };
+        if (!face_at_voice.empty()) {  // the voice came from where their face is
+            bool contra = clear && ranks[0].name != face_at_voice && ranks[0].solidity >= 0.5f &&
+                          scoreOf(face_at_voice) < ranks[0].score - 0.2f;
+            if (!contra) { who = face_at_voice; hint = " (voice: " + who + " - it came from where " + who + " is)"; }
+        }
+        if (who.empty() && d.ok) {  // from where someone was just talking, and the voice doesn't say otherwise
+            std::lock_guard<std::mutex> lk(voice_mu_);
+            for (auto& [n, pl] : speaker_place_)
+                if (now - pl.second < std::chrono::minutes(3) && std::fabs(wrap180(pl.first - d.world)) < 20.f &&
+                    (!clear || ranks[0].name == n) && (ranks.empty() || scoreOf(n) >= 0.3f)) {
+                    who = n;
+                    hint = " (voice: probably " + n + " - from where " + n + " was just talking)";
+                }
+        }
+        if (who.empty() && !voice_off_faces && n_around == 1 && around.size() == 1) {  // only one person around: assume it's them...
             std::string p = *around.begin();
             bool contradicted = clear && ranks[0].name != p && ranks[0].solidity >= 0.5f;  // ...unless clearly not
             if (!contradicted) { who = p; hint = " (voice: " + p + " - the only one around)"; }
@@ -953,26 +1043,31 @@ private:
             std::snprintf(b, sizeof b, "%s%s %.2f", i ? ", " : "", ranks[i].name.c_str(), ranks[i].score);
             sc += b;
         }
-        std::printf("[voice] %.1fs, %zu around, effort %s: %s -> %s\n", pcm.size() / 16000.0, n_around,
-                    effort.c_str(), sc.empty() ? "(no voiceprints yet)" : sc.c_str(), who.empty() ? "?" : who.c_str());
+        std::printf("[voice] %.1fs, %zu around, effort %s: %s -> %s%s%s\n", pcm.size() / 16000.0, n_around,
+                    effort.c_str(), sc.empty() ? "(no voiceprints yet)" : sc.c_str(), who.empty() ? "?" : who.c_str(),
+                    face_at_voice.empty() ? "" : (" [face at the voice: " + face_at_voice + "]").c_str(),
+                    voice_off_faces ? " [voice from off camera]" : "");
         bool learned = false;
         {
             std::lock_guard<std::mutex> lk(voice_mu_);
             if (!who.empty()) {
                 recent_voices_.push_back({who, now});
+                if (d.ok) speaker_place_[who] = {d.world, now};
                 for (auto& m : ranks)
                     if (m.name == who) last_voice_match_[who] = {m.score, int64_t(std::time(nullptr))};
             }
             if (!who.empty() && clear && ranks[0].name == who && ranks[0].solidity >= 0.5f) {
                 prints_.reinforce(who, e);  // a confident match solidifies the voiceprint
                 learned = true;
-            } else if (faces_known.size() == 1 && !unknown_face && who == *faces_known.begin() &&
+            } else if (((faces_known.size() == 1 && !unknown_face && who == *faces_known.begin()) ||
+                        (!face_at_voice.empty() && who == face_at_voice && d.conf >= 0.5f)) &&
                        pcm.size() >= 40000 && !(clear && ranks[0].name != who) &&
                        now - last_voice_enroll_[who] > std::chrono::seconds(20)) {
                 prints_.enroll(who, e);  // the only face-recognised person in view said it: provisional sample
                 last_voice_enroll_[who] = now;
                 learned = true;
-                std::printf("[voice] learning %s's voice (the only recognised face in view)\n", who.c_str());
+                std::printf("[voice] learning %s's voice (%s)\n", who.c_str(),
+                            who == face_at_voice ? "their face is where the voice came from" : "the only recognised face in view");
             }
         }
         if (!learned && pcm.size() >= 40000) {  // "my name is Sam" / "I'm Sam": a self-introduction is verified too
@@ -1026,6 +1121,295 @@ private:
         flushCues();            // (waits until he's reachable and awake)
     }
 
+    static std::string agoWords(int64_t secs) {
+        if (secs < 3600) return std::to_string(std::max<int64_t>(1, secs / 60)) + " minutes";
+        if (secs < 2 * 86400) return std::to_string(secs / 3600) + " hours";
+        return std::to_string(secs / 86400) + " days";
+    }
+    // Keep a short note of what he saw (so "what was I wearing earlier?" has an answer). Fades in 2 days.
+    void noteSight(const std::string& desc) {
+        if (desc.empty()) return;
+        auto now = Clock::now();
+        auto words = [](const std::string& t) {
+            std::set<std::string> w; std::string c;
+            for (char ch : t + " ") {
+                if (std::isalnum(static_cast<unsigned char>(ch))) c += char(std::tolower(static_cast<unsigned char>(ch)));
+                else { if (c.size() > 3) w.insert(c); c.clear(); }
+            }
+            return w;
+        };
+        auto a = words(desc), b = words(last_sight_);
+        size_t inter = 0;
+        for (auto& x : a) inter += b.count(x);
+        size_t uni = a.size() + b.size() - inter;
+        if (now - last_sight_at_ < std::chrono::seconds(90) || (uni && double(inter) / uni > 0.5)) return;
+        last_sight_ = desc;
+        last_sight_at_ = now;
+        std::vector<std::string> people;
+        for (auto& n : facesInView(10)) if (isRealName(n)) people.push_back(mind_.canonicalName(n));
+        mind_.remember("I saw: " + desc, 1, people, "observation");
+    }
+    // Every few minutes, awake and not busy: a quiet look around. Objects are compared with what he usually
+    // sees from this spot (docked / on the floor, and which way he faces). Something new that is still there
+    // on the next look is novelty: he notices it, and may remark on it.
+    std::string placeKey() const {
+        int heading = int(std::lround(robot_yaw_.load() / 45.f)) * 45;
+        return std::string(on_charger_.load() ? "dock" : "floor") + ":" + std::to_string(heading);
+    }
+    static std::string objectKey(std::string o) {
+        for (auto& c : o) c = char(std::tolower(static_cast<unsigned char>(c)));
+        while (!o.empty() && !std::isalpha(static_cast<unsigned char>(o.back()))) o.pop_back();
+        auto sp = o.find_last_of(' ');
+        std::string head = sp == std::string::npos ? o : o.substr(sp + 1);
+        if (head.size() > 3 && head.back() == 's' && head[head.size() - 2] != 's') head.pop_back();
+        return head;
+    }
+    void ambientTick(Clock::time_point now) {
+        if (opt_.vision_model.empty() || !opt_.use_camera || ambient_busy_.load() || !robot_up_.load()) return;
+        if (calm_.load() || hushed() || calib_ || now < convo_until_.load() || now - last_ambient_ < std::chrono::minutes(4))
+            return;
+        std::string jpeg;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (!frame_.empty() && now - frame_time_ < std::chrono::seconds(10)) jpeg = frame_;
+        }
+        if (jpeg.empty()) return;
+        last_ambient_ = now;
+        ambient_busy_ = true;
+        std::string key = placeKey();
+        bool docked = on_charger_.load();
+        std::thread([this, jpeg, key, docked] {
+          try {
+            std::string err;
+            std::string list = describeImage(opt_.vision_url, opt_.vision_model, jpeg,
+                "List the distinct physical objects you can clearly see (not people, not walls or floor), as a JSON "
+                "array of short lowercase names, e.g. [\"mug\", \"laptop\"]. Only the array.", &err);
+            ambient_busy_ = false;
+            auto a = list.find('['), b = list.rfind(']');
+            if (a == std::string::npos || b == std::string::npos || b < a) return;
+            json arr;
+            try { arr = json::parse(list.substr(a, b - a + 1)); } catch (...) { return; }
+            if (!arr.is_array()) return;
+            std::map<std::string, std::string> seen;  // key -> as named
+            for (auto& x : arr) if (x.is_string() && !x.get<std::string>().empty()) seen[objectKey(x)] = x.get<std::string>();
+            if (seen.empty()) return;
+            {
+                std::string names;
+                for (auto& [k, n] : seen) names += (names.empty() ? "" : ", ") + n;
+                std::printf("[ambient] look around (%s): %s\n", key.c_str(), names.c_str());
+            }
+            std::string found;
+            {
+                std::lock_guard<std::mutex> lk(ambient_mu_);
+                auto& pl = places_[key];
+                if (!pl.is_object()) pl = json::object();
+                int looks = pl.value("looks", 0);
+                json known = pl.value("known", json::object()), pending = pl.value("pending", json::object());
+                json next_pending = json::object();
+                for (auto& [k, name] : seen) {
+                    if (known.contains(k)) { known[k] = known[k].get<int>() + 1; continue; }
+                    if (pending.contains(k) && looks >= 3) { found = found.empty() ? name : found; known[k] = 1; continue; }
+                    if (looks < 3) known[k] = 1;  // still learning what's normal here
+                    else next_pending[k] = 1;
+                }
+                pl["looks"] = looks + 1;
+                pl["known"] = known;
+                pl["pending"] = next_pending;
+                std::ofstream f(mind_dir_ + "/ambient.json");
+                f << places_.dump();
+            }
+            if (found.empty()) return;
+            auto now2 = Clock::now();
+            std::printf("[ambient] something new: %s (%s)\n", found.c_str(), key.c_str());
+            mind_.remember("I noticed something new " + std::string(docked ? "near my charger" : "where I was") + ": " +
+                           found + ".", 2, {}, "observation");
+            if (now2 - last_novelty_ < std::chrono::minutes(20)) return;
+            last_novelty_ = now2;
+            mind_.feel("curiosity", 0.15f);
+            push({Stimulus::Body, "Something new caught your eye: " + found + ". It wasn't there the other times you "
+                  "looked around from here." + std::string(docked ? "" : " (You could roll closer for a better look.)") +
+                  " React only if it genuinely interests you; a dry remark is fine, or just look.", 2, true});
+          } catch (const std::exception& e) {
+            ambient_busy_ = false;
+            std::fprintf(stderr, "[ambient] look-around failed: %s\n", e.what());
+          }
+        }).detach();
+    }
+    // When a conversation has ended: a one-line recap for that person, so next time he can pick up the thread.
+    void conversationTick(Clock::time_point now) {
+        try { conversationRecap(now); } catch (const std::exception& e) { std::fprintf(stderr, "[memory] recap failed: %s\n", e.what()); }
+    }
+    void conversationRecap(Clock::time_point now) {
+        if (convo_turns_ < 2 || convo_person_.empty() || now < convo_until_.load() ||
+            now - convo_last_ < std::chrono::seconds(90))
+            return;
+        std::string who = convo_person_;
+        int turns = convo_turns_;
+        convo_person_.clear();
+        convo_turns_ = 0;
+        LlmBackend* m = fast_ ? fast_.get() : llm_.get();
+        std::string lines;
+        for (auto& [w, t] : mind_.recentDialogue(size_t(std::min(30, turns * 2 + 4)))) lines += w + ": " + t + "\n";
+        if (lines.empty()) return;
+        json schema = {{"type", "object"}, {"additionalProperties", false}, {"required", {"recap"}},
+                       {"properties", {{"recap", {{"type", "string"}}}}}};
+        json out;
+        std::string err;
+        setCallReason("conversation recap");
+        if (!m->complete("You keep a small robot's memory. Be brief and concrete.",
+                         {{"user", "Recent conversation (" + mind_.name() + " is the robot):\n" + lines +
+                           "\nIn ONE short sentence from " + mind_.name() + "'s point of view, what did " + mind_.name() +
+                           " and " + who + " talk about? Start with \"Talked with " + who + " about\". Mention a "
+                           "detail worth asking about next time.", ""}},
+                         schema, out, &err))
+            return;
+        std::string recap = out.value("recap", "");
+        if (recap.rfind("Talked with", 0) != 0) return;
+        mind_.remember(recap, 3, {who}, "episode");
+        std::printf("[memory+] %s\n", recap.c_str());
+    }
+    static float wrap180(float d) {
+        while (d > 180) d -= 360;
+        while (d <= -180) d += 360;
+        return d;
+    }
+    std::vector<SeenFace> recentFaces(std::chrono::milliseconds within) {
+        std::vector<SeenFace> out;
+        auto now = Clock::now();
+        std::lock_guard<std::mutex> lk(seen_mu_);
+        for (auto& [id, f] : seen_faces_)
+            if (now - f.at <= within) out.push_back(f);
+        return out;
+    }
+    static std::string bearingWords(float rel) {  // rel: + = left
+        float a = std::fabs(rel);
+        std::string side = rel > 0 ? "left" : "right";
+        if (a < 20) return "from right in front of you";
+        if (a < 70) return "from your front " + side;
+        if (a < 120) return "from your " + side;
+        if (a < 160) return "from behind you, on your " + side;
+        return "from behind you";
+    }
+    // Where this piece of speech came from. Also: learns the mic layout from people talking while their face
+    // is the only one in view, and asks the main loop to turn him toward a voice he can't see.
+    SpeechDir noteVoiceDirection(const Heard& h, bool to_me) {
+        SpeechDir d;
+        if (!h.doa.ok) return d;
+        float yaw = robot_yaw_.load();
+        auto vis = recentFaces(std::chrono::milliseconds(1500));
+        float pb = 0, pc = 0;
+        bool have = dir_model_.predict(h.doa, pb, pc);
+        if (vis.size() == 1 && !h.doa.moving && (vis[0].frontal || !vis[0].who.empty())) {
+            float rel = wrap180(vis[0].world - yaw);
+            if (!have || pc < 0.3f || std::fabs(wrap180(pb - rel)) < 35.f) {  // not someone else, off camera
+                bool was = dir_model_.ready();
+                dir_model_.addSample(h.doa, rel, to_me ? 1.f : 0.5f);
+                if (++dir_unsaved_ >= 3 || (!was && dir_model_.ready())) { dir_unsaved_ = 0; dir_model_.save(); }
+                if (!was && dir_model_.ready())
+                    std::printf("[direction] learned where voices come from: %s\n", dir_model_.summary().c_str());
+            }
+        }
+        if (have)
+            std::printf("[direction] voice from %+.0f deg (confidence %.2f, quality %.2f)\n", pb, pc, h.doa.quality);
+        if (have && pc >= 0.35f) { d.ok = true; d.world = wrap180(pb + yaw); d.conf = pc; }
+        if (d.ok && to_me && pc >= 0.5f && std::fabs(pb) > 30.f && !on_charger_.load() && !hushed() && !calib_ &&
+            !brownout_safe_ && !picked_ && Clock::now() - last_turn_ > std::chrono::seconds(4)) {
+            bool face_there = false;
+            for (auto& f : vis) if (std::fabs(wrap180(f.world - d.world)) < 25.f) face_there = true;
+            if (!face_there) { turn_to_ = pb; turn_pending_ = true; }
+        }
+        return d;
+    }
+    // A hint for the mind about where the voice came from, when that tells it something.
+    std::string directionHint(const SpeechDir& d) {
+        if (!d.ok || d.conf < 0.5f) return "";
+        auto faces = recentFaces(std::chrono::seconds(3));
+        bool unknown_there = false, known_there = false;
+        for (auto& f : faces)
+            if (std::fabs(wrap180(f.world - d.world)) < 22.f) (isRealName(f.who) ? known_there : unknown_there) = true;
+        if (known_there) return "";
+        if (unknown_there) return " (the voice came from the person you don't recognise)";
+        return " (the voice came " + bearingWords(wrap180(d.world - robot_yaw_.load())) +
+               (faces.empty() ? "" : ", not from anyone you can see") + ")";
+    }
+    // His back button: stop talking and listen (and it counts as someone dealing with him directly).
+    void onButton(Clock::time_point now) {
+        convo_until_ = now + std::chrono::seconds(25);
+        if (speaking_.load()) {
+            interrupted_ = true;
+            vec_.cancelSay();
+            std::printf("[say] interrupted (someone pressed his back button)\n");
+        }
+        if (hushed()) {
+            endHush("someone pressed his back button");
+            wake_override_until_ = now + std::chrono::seconds(60);
+        }
+    }
+    // Streaming: pull a string field out of a reply that is still being written. done = closing quote seen.
+    static bool partialField(const std::string& t, const char* key, std::string& val, bool& done) {
+        std::string k = std::string("\"") + key + "\"";
+        auto p = t.find(k);
+        if (p == std::string::npos) return false;
+        p = t.find(':', p + k.size());
+        if (p == std::string::npos) return false;
+        p = t.find('"', p);
+        if (p == std::string::npos) return false;
+        val.clear();
+        done = false;
+        for (size_t i = p + 1; i < t.size(); ++i) {
+            char c = t[i];
+            if (c == '"') { done = true; return true; }
+            if (c != '\\') { val += c; continue; }
+            if (i + 1 >= t.size()) return true;
+            char e = t[++i];
+            if (e == 'u') {
+                if (i + 4 >= t.size()) return true;
+                unsigned cp = unsigned(std::strtoul(t.substr(i + 1, 4).c_str(), nullptr, 16));
+                i += 4;
+                if (cp < 0x80) val += char(cp);
+                else if (cp < 0x800) { val += char(0xC0 | (cp >> 6)); val += char(0x80 | (cp & 0x3F)); }
+                else { val += char(0xE0 | (cp >> 12)); val += char(0x80 | ((cp >> 6) & 0x3F)); val += char(0x80 | (cp & 0x3F)); }
+            } else {
+                val += e == 'n' || e == 't' ? ' ' : e;
+            }
+        }
+        return true;
+    }
+    // Speak each finished sentence of "say" while the rest of the reply is still being written (only once
+    // "escalate" is "none": a moment handed to a stronger mind must not be half-answered by this one).
+    void streamSpeech(const std::string& t) {
+        if (interrupted_.load()) return;
+        std::string esc, say;
+        bool ed = false, sd = false;
+        if (!partialField(t, "escalate", esc, ed) || !ed || esc != "none") return;
+        if (!partialField(t, "say", say, sd) || say.size() <= streamed_said_.size()) return;
+        if (say.compare(0, streamed_said_.size(), streamed_said_) != 0) return;
+        std::string rest = say.substr(streamed_said_.size());
+        size_t cut = std::string::npos;
+        if (sd) cut = rest.size();
+        else
+            for (size_t i = 8; i + 1 < rest.size(); ++i)
+                if ((rest[i] == '.' || rest[i] == '!' || rest[i] == '?') && rest[i + 1] == ' ') cut = i + 1;
+        if (cut == std::string::npos) return;
+        std::string chunk = rest.substr(0, cut);
+        streamed_said_ += chunk;
+        auto b = chunk.find_first_not_of(' ');
+        if (b == std::string::npos) return;
+        chunk = chunk.substr(b);
+        if (!stream_body_) {
+            if (!takeBody()) { interrupted_ = true; return; }
+            stream_body_ = true;
+            if (ears_) ears_->setMuted(true);
+        }
+        std::printf("[say ~] %s\n", chunk.c_str());
+        speak(limitNameAddress(chunk));
+    }
+    void endStreamBody() {
+        if (!stream_body_) return;
+        stream_body_ = false;
+        if (!opt_.keep_control && control_) control_->release();
+        if (ears_) ears_->setMuted(false);
+    }
     bool hushed() const { return std::time(nullptr) < hush_until_.load(); }
     bool hushStrict() const { return hushed() && Clock::now() > hush_grace_until_.load(); }
     std::string hushFile() const { return mind_dir_ + "/hush_until"; }
@@ -1098,6 +1482,7 @@ private:
             vec_.goHome();
         }
     }
+    std::atomic<bool> voice_dl_busy_{false}, voice_dl_done_{false};
     std::string loadVoiceId() {
         if (voice_.ready()) return "";
         std::string verr, sm = opt_.speaker_model;
@@ -1109,6 +1494,14 @@ private:
             prints_.decay(std::time(nullptr));
             std::printf("[voice] voice recognition on (%zu voiceprint(s))\n", prints_.summary().size());
             return "";
+        }
+        if (!sm.empty() && !std::filesystem::exists(sm) && !knownModelUrl(sm).empty()) {
+            if (!voice_dl_busy_.exchange(true))
+                std::thread([this, sm] {
+                    if (ensureModelFile(sm, "voice recognition model")) voice_dl_done_ = true;
+                    voice_dl_busy_ = false;
+                }).detach();
+            return "downloading the voice model - voice recognition starts by itself when it's here";
         }
         if (sm.empty()) verr = "no speaker model configured";
         std::printf("[voice] voice recognition unavailable: %s\n", verr.c_str());
@@ -1207,7 +1600,9 @@ private:
         bool continuing;
         { std::lock_guard<std::mutex> lk(speech_mu_); continuing = !speech_buf_.empty(); }
         if (addressed || convo || facing || continuing || (opt_.listen_all && words >= 2)) {
+            SpeechDir d = noteVoiceDirection(h, addressed || convo || facing);
             std::lock_guard<std::mutex> lk(speech_mu_);
+            if (d.ok && (!speech_dir_.ok || d.conf > speech_dir_.conf)) speech_dir_ = d;
             speech_buf_ += (speech_buf_.empty() ? "" : " ") + h.text;
             if (h.audio) speech_pcm_.insert(speech_pcm_.end(), h.audio->begin(), h.audio->end());
             if (!speech_audio_) speech_audio_ = h.audio;  // the first piece (introductions come first)
@@ -1331,6 +1726,17 @@ private:
                     flicker_unknown = true;  // someone was just recognised: don't announce a "stranger" yet
                 }
                 if (face_names_.size() > 64) face_names_.clear();
+                if (cam_fx_.load() > 0) {
+                    std::lock_guard<std::mutex> lk2(seen_mu_);
+                    float rel = float(std::atan2(cam_cx_.load() - cx, cam_fx_.load()) * 180.0 / M_PI);
+                    auto& sf = seen_faces_[f.face_id()];
+                    sf.who = who;
+                    sf.world = wrap180(rel + robot_yaw_.load());
+                    sf.frontal = face_landmarks_ok_ && face_frontal_;
+                    sf.at = now;
+                    for (auto it = seen_faces_.begin(); it != seen_faces_.end();)
+                        it = now - it->second.at > std::chrono::seconds(30) ? seen_faces_.erase(it) : std::next(it);
+                }
             }
             if (!who.empty()) {
                 std::string canon = mind_.canonicalName(who);
@@ -1352,6 +1758,7 @@ private:
                 else if (!flicker_unknown) faces_["someone unknown"] = now;
                 if (f.expression() > 1) last_expression_ = vpb::FacialExpression_Name(f.expression());
             }
+            int64_t prev_seen = who.empty() ? 0 : mind_.lastSeen(who);
             if (!who.empty()) mind_.sawPerson(who);
             auto key = who.empty() ? std::string("?") : who;
             // A stranger must persist (seen for 4+ s) before he reacts - one stray "unknown" isn't a visitor.
@@ -1361,15 +1768,32 @@ private:
                 last_unknown_at_ = now;
                 if (flicker_unknown || now - first_unknown_at_ < std::chrono::seconds(4)) return;
             }
+            // Someone he doesn't know, still here after a while: invite them to introduce themselves.
+            if (who.empty() && now - first_unknown_at_ > std::chrono::seconds(20) &&
+                now - last_stranger_invite_ > std::chrono::minutes(15) && !hushed()) {
+                last_stranger_invite_ = now;
+                push({Stimulus::Face, std::string("The person you don't recognise is still here. If it feels natural, invite "
+                      "them to introduce themselves") + (opt_.recognition ? " - and if they'd like you to know them "
+                      "next time, they can ask you to remember their face." : "."), 2});
+            }
             auto it = greeted_.find(key);
             if (it == greeted_.end() || now - it->second > std::chrono::minutes(20)) {
                 greeted_[key] = now;
+                std::string extra;
+                if (!who.empty()) {
+                    int64_t t = std::time(nullptr);
+                    if (prev_seen > 0 && t - prev_seen > 1800) extra += " You last saw them " + agoWords(t - prev_seen) + " ago.";
+                    int64_t when = 0;
+                    std::string recap = mind_.latestMemory(who, "episode", "Talked with", &when);
+                    if (!recap.empty() && t - when < 14 * 86400)
+                        extra += " Last time (" + agoWords(t - when) + " ago): " + recap;
+                }
                 mind_.feel("happiness", 0.08f);
                 mind_.feel("curiosity", who.empty() ? 0.1f : 0.f);
                 push({Stimulus::Face,
                       who.empty() ? "Your body sees a face it doesn't recognize (its recognition often misses familiar "
                                     "faces at odd angles - it may well be someone you know)."
-                                  : "You see " + who + " (you recognize them).",
+                                  : "You see " + who + " (you recognize them)." + extra,
                       3});
             }
         } else if (e.has_object_event()) {
@@ -1410,6 +1834,10 @@ private:
 
     void onRobotState(const vpb::RobotState& rs, Clock::time_point now) {
         uint32_t st = rs.status();
+        robot_yaw_ = float(rs.pose_angle_rad() * 180.0 / M_PI);
+        bool button = (st & 0x10) != 0;  // ROBOT_STATUS_IS_BUTTON_PRESSED
+        if (button && !button_) onButton(now);
+        button_ = button;
         bool touched = rs.touch_data().is_being_touched();
         bool picked = (st & (kPickedUp | kHeld)) != 0;
         bool charger = (st & kOnCharger) != 0;
@@ -1985,11 +2413,12 @@ private:
                 std::string verr;
                 auto t0 = Clock::now();
                 sceneDesc = describeImage(opt_.vision_url, opt_.vision_model, jpeg,
-                                          "You are the eyes of a small robot. In one short, factual "
-                                          "sentence describe what is in front of the camera (people, "
-                                          "objects, setting). Do not guess names.", &verr);
+                                          "You are the eyes of a small robot. In one or two short, factual "
+                                          "sentences describe what is in front of the camera: people (what "
+                                          "they wear and are doing), objects, setting. Do not guess names.", &verr);
                 double dt = std::chrono::duration<double>(Clock::now() - t0).count();
                 if (!sceneDesc.empty()) {
+                    noteSight(sceneDesc);
                     last_image_sent_ = Clock::now();
                     std::printf("[eyes %.1fs local] %s\n", dt, sceneDesc.c_str());
                 } else {
@@ -2014,8 +2443,18 @@ private:
         std::string err;
         setCallReason(std::string(s.kind == Stimulus::Speech || s.kind == Stimulus::Typed ? "speech: " : "") + s.text +
                       (sceneDesc.empty() ? "" : " [saw: " + sceneDesc.substr(0, 40) + "]"));
-        if (!mind->complete(systemPrompt(), {{"user", user, ""}}, replySchema(), r, &err)) {
+        // Someone talking to him: start speaking the reply as soon as its first sentence is written.
+        streamed_said_.clear();
+        interrupted_ = false;
+        current_stimulus_ = s.text;
+        current_kind_ = s.kind;
+        bool stream = (s.kind == Stimulus::Speech || s.kind == Stimulus::Typed) && !hushStrict();
+        if (stream) setPartialReplyCallback([this](const std::string& t) { streamSpeech(t); });
+        bool thought_ok = mind->complete(systemPrompt(), {{"user", user, ""}}, replySchema(), r, &err);
+        setPartialReplyCallback(nullptr);
+        if (!thought_ok) {
             std::fprintf(stderr, "[mind] thinking failed: %s\n", err.c_str());
+            endStreamBody();
             return;
         }
         // Self-escalation: the mind says this moment needs a stronger model -> re-think once.
@@ -2030,7 +2469,10 @@ private:
                                     "\"escalate\" to \"none\").\n" + situation(s, sceneDesc);
                 json r2;
                 std::string err2;
-                if (stronger->complete(systemPrompt(), {{"user", user2, ""}}, replySchema(), r2, &err2)) {
+                if (stream) setPartialReplyCallback([this](const std::string& t) { streamSpeech(t); });
+                bool ok2 = stronger->complete(systemPrompt(), {{"user", user2, ""}}, replySchema(), r2, &err2);
+                setPartialReplyCallback(nullptr);
+                if (ok2) {
                     r = r2;
                     mind = stronger;
                 } else {
@@ -2094,10 +2536,17 @@ private:
         }
         if (r.value("conversation", "end") == "continue")
             convo_until_ = Clock::now() + std::chrono::seconds(25);
+        if ((s.kind == Stimulus::Speech || s.kind == Stimulus::Typed) && isRealName(partner_)) {
+            if (convo_person_ != partner_) { convo_person_ = partner_; convo_turns_ = 0; }
+            ++convo_turns_;
+            convo_last_ = Clock::now();
+        }
 
         current_stimulus_ = s.text;
         current_kind_ = s.kind;
         act(r, s.kind == Stimulus::Idle);
+        endStreamBody();
+        streamed_said_.clear();
         mind_.save();
     }
 
@@ -2134,6 +2583,7 @@ private:
     void act(const json& r, bool idle) {
         auto actions = r.value("actions", json::array());
         std::string say = limitNameAddress(r.value("say", ""));
+        const std::string already = streamed_said_;  // spoken while the reply was being written
         auto now = Clock::now();
         bool alone = facesInView(60).empty() && now > convo_until_.load();
         if (idle && alone && !say.empty()) {
@@ -2310,7 +2760,7 @@ private:
             auto a = wordset(say), b = wordset(last_said_);
             size_t inter = 0; for (auto& x : a) inter += b.count(x);
             size_t uni = a.size() + b.size() - inter;
-            bool dup = uni && double(inter) / uni >= 0.6 &&
+            bool dup = already.empty() && uni && double(inter) / uni >= 0.6 &&
                        Clock::now() - last_said_at_ < std::chrono::seconds(120);
             if (dup) {
                 std::printf("[say] (skipped - too similar to the last thing said: %s)\n", say.c_str());
@@ -2319,7 +2769,14 @@ private:
                 last_said_ = say; last_said_at_ = Clock::now();
                 updateEarsVocabulary();
                 mind_.logDialogue(mind_.name(), say);
-                speak(say);
+                if (already.empty()) {
+                    speak(say);
+                } else {  // only what the stream hadn't said yet
+                    std::string raw = r.value("say", "");
+                    std::string rest = raw.compare(0, already.size(), already) == 0 ? raw.substr(already.size()) : "";
+                    auto b = rest.find_first_not_of(' ');
+                    if (b != std::string::npos) speak(limitNameAddress(rest.substr(b)));
+                }
             }
         }
 
@@ -2413,6 +2870,12 @@ private:
     }
 
     void speak(const std::string& written) {
+        if (interrupted_.load()) return;  // the back button stops the rest of a reply too
+        speaking_ = true;
+        speakNow(written);
+        speaking_ = false;
+    }
+    void speakNow(const std::string& written) {
         std::string text = mind_.spoken(written);  // names respelled for the voice
         if (opt_.tts_cmd.empty()) {
             vec_.say(text);
@@ -3765,6 +4228,38 @@ private:
     Clock::time_point last_said_at_{};
     std::string firmware_;
     bool go_home_after_ = false;
+    // ---- where voices come from (doa.hpp) and where faces are. Bearings are "world" degrees: his own heading
+    // plus the angle seen, so they stay put while he turns. + = left.
+    DirectionFinder dir_;
+    DirectionModel dir_model_;
+    std::mutex seen_mu_;
+    std::map<int, SeenFace> seen_faces_;  // by the robot's face id
+    std::atomic<float> robot_yaw_{0};
+    std::atomic<float> cam_fx_{0}, cam_cx_{320};
+    Clock::time_point last_cam_cfg_try_{};
+    SpeechDir speech_dir_;  // best direction of the speech being collected (speech_mu_)
+    std::map<std::string, std::pair<float, Clock::time_point>> speaker_place_;  // who spoke from where (voice_mu_)
+    std::atomic<float> turn_to_{0};
+    std::atomic<bool> turn_pending_{false};
+    Clock::time_point last_turn_{};
+    int dir_unsaved_ = 0;
+    // ---- talking: interruptible (his back button), and a reply can start before it's fully written
+    std::atomic<bool> speaking_{false}, interrupted_{false};
+    std::string streamed_said_;  // the part of the current reply already spoken (main thread)
+    bool stream_body_ = false;
+    bool button_ = false;
+    // ---- life between conversations
+    Clock::time_point last_stranger_invite_{};
+    std::string last_sight_;                      // what he last kept a note of seeing
+    Clock::time_point last_sight_at_{};
+    std::atomic<bool> ambient_busy_{false};
+    Clock::time_point last_ambient_{};
+    Clock::time_point last_novelty_{};
+    json places_ = json::object();                // what he usually sees from each spot (ambient.json)
+    std::mutex ambient_mu_;
+    std::string convo_person_;                    // the conversation in progress, for its recap
+    int convo_turns_ = 0;
+    Clock::time_point convo_last_{};
     // ---- hush: "be quiet" / "go to sleep" = about 2 hours of quiet: he goes to his charger and sleeps (the
     // body's own sleep), says nothing, moves nothing. Ends early only when someone deals with him directly
     // (calls him by name, pets him, types to him). Persisted, so a restart doesn't wake him.

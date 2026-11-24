@@ -13,6 +13,12 @@
 //     only while no raw packets have arrived for a moment (e.g. shim not loaded).
 //
 // The robot LISTENS on :9099; MBot connects in. Only one client at a time (a new one replaces it).
+//
+// Direction of sound (:9098): MBot works out where a voice comes from by comparing the 4 mics. To keep
+// Wi-Fi traffic and power low, the raw 4-channel packets are only sent while MBot asks for them (while it
+// hears someone speak): the client sends 'S' (start: the last ~0.5 s from a ring buffer, then live) and
+// 'E' (end). Packets go out unchanged (1293 bytes each: tag, 4x160 planar int16 @ 15625 Hz, timestamp,
+// status, head angle).
 package main
 
 import (
@@ -36,6 +42,78 @@ const (
 	chSamples   = 160     // per channel per packet
 	rawFreshFor = 500 * time.Millisecond
 )
+
+const ringLen = 48 // ~0.5 s of raw packets
+
+var (
+	rawMu     sync.Mutex
+	ring      [ringLen][micPktLen]byte
+	ringNext  int
+	ringFill  int
+	rawClient net.Conn
+	rawLive   bool
+)
+
+// noteRawPacket keeps the packet in the ring and, while a direction request is open, forwards it.
+func noteRawPacket(pkt []byte) {
+	rawMu.Lock()
+	defer rawMu.Unlock()
+	copy(ring[ringNext][:], pkt)
+	ringNext = (ringNext + 1) % ringLen
+	if ringFill < ringLen {
+		ringFill++
+	}
+	if rawLive && rawClient != nil {
+		rawClient.SetWriteDeadline(time.Now().Add(100 * time.Millisecond))
+		if _, err := rawClient.Write(pkt); err != nil {
+			rawClient.Close()
+			rawClient, rawLive = nil, false
+		}
+	}
+}
+
+// serveRaw handles one direction client: 'S' = send the ring then live packets, 'E' = stop.
+func serveRaw(c net.Conn) {
+	rawMu.Lock()
+	if rawClient != nil {
+		rawClient.Close()
+	}
+	rawClient, rawLive = c, false
+	rawMu.Unlock()
+	cmd := make([]byte, 1)
+	for {
+		if _, err := c.Read(cmd); err != nil {
+			break
+		}
+		rawMu.Lock()
+		if rawClient != c {
+			rawMu.Unlock()
+			break
+		}
+		switch cmd[0] {
+		case 'S':
+			if !rawLive {
+				c.SetWriteDeadline(time.Now().Add(300 * time.Millisecond))
+				for i := 0; i < ringFill; i++ {
+					idx := (ringNext - ringFill + i + ringLen) % ringLen
+					if _, err := c.Write(ring[idx][:]); err != nil {
+						break
+					}
+				}
+				rawLive = true
+			}
+		case 'E':
+			rawLive = false
+		}
+		rawMu.Unlock()
+	}
+	rawMu.Lock()
+	if rawClient == c {
+		rawClient, rawLive = nil, false
+	}
+	rawMu.Unlock()
+	c.Close()
+}
 
 var (
 	mu       sync.Mutex
@@ -137,6 +215,7 @@ func rawLoop() {
 			fmt.Fprintln(os.Stderr, "[raw] raw mic stream flowing - constant listening")
 		}
 		lastRaw.Store(time.Now().UnixNano())
+		noteRawPacket(buf[:n])
 		pcm = rp.process(buf[:n], pcm)
 		if pending++; pending >= batch {
 			writeClient(pcm)
@@ -174,6 +253,20 @@ func main() {
 		}
 	}()
 
+	if rln, err := net.Listen("tcp4", "0.0.0.0:9098"); err == nil {
+		go func() {
+			for {
+				c, err := rln.Accept()
+				if err != nil {
+					return
+				}
+				fmt.Fprintln(os.Stderr, "[dir] direction client connected:", c.RemoteAddr())
+				go serveRaw(c)
+			}
+		}()
+	} else {
+		fmt.Fprintln(os.Stderr, "[dir] can't listen on :9098 (direction of sound off):", err)
+	}
 	go rawLoop()
 	go func() { // heartbeat so the logs show the stream is alive (every 10 min)
 		for range time.Tick(10 * time.Minute) {

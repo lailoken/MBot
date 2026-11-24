@@ -15,6 +15,7 @@ the components compiled into them (sections 1 and 2).
 |---|---|---|---|
 | **Anki Vector SDK protocol definitions** (`anki_vector/messaging/*.proto`), Copyright (c) 2018 Anki, Inc. | **Apache-2.0** | via [kercre123/wirepod-vector-python-sdk](https://github.com/kercre123/wirepod-vector-python-sdk) @ `065fc19` | generating the C++ gRPC client for the robot's SDK gateway. **Modification:** at build time `CMakeLists.txt` removes the `import "google/api/annotations.proto";` line (REST hints not needed); the modified copies exist only under `build/` |
 | **whisper.cpp / ggml**, Copyright (c) 2023-2026 The ggml authors | **MIT** | [ggml-org/whisper.cpp](https://github.com/ggml-org/whisper.cpp) @ `5eaee0c` | local speech-to-text (statically linked) |
+| ggml **Vulkan** backend (part of whisper.cpp / ggml) | **MIT** | as above | speech-to-text on the GPU, when built with Vulkan; dynamically links the system **Vulkan loader** (Apache-2.0). Build-time only: Vulkan headers (Apache-2.0), SPIR-V headers (MIT-style Khronos licence), `glslc` from shaderc (Apache-2.0) |
 | **nlohmann/json**, Copyright (c) 2013-2025 Niels Lohmann | **MIT** | distribution package (`json-devel`) | JSON (header-only, compiled in) |
 | **gRPC C++**, Copyright The gRPC Authors | **Apache-2.0** | distribution package (`grpc-devel`) | robot SDK transport (dynamically linked) |
 | **Protocol Buffers**, Copyright Google LLC | **BSD-3-Clause** | distribution package (`protobuf-devel`) | message encoding (dynamically linked) |

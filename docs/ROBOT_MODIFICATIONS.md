@@ -118,6 +118,15 @@ firewall. It has two sources:
 
 Only one client at a time; a new connection replaces the old one.
 
+**Direction of sound (TCP :9098).** mictap also keeps the last ~0.5 s of raw 4-channel packets in a ring
+buffer. MBot connects to :9098 and, only while it hears someone speaking, sends `S` (mictap replies with
+the ring buffer, then live packets, unchanged: 1293 bytes each) and `E` to stop. The PC works out the
+direction from the time differences between the mics. Nothing is sent while nobody speaks.
+
+**Install / update:** `robot/install.sh <robot-ip>` builds, uploads (checksum-verified, old binary kept as
+`.prev`), self-tests the shim on the robot before using it, writes the units below if missing, and asks
+before rebooting. `robot/install.sh <ip> --check` only reports.
+
 **Files**
 | Path | Purpose |
 |---|---|

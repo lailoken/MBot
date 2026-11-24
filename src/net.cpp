@@ -153,7 +153,13 @@ bool decodeChunked(const std::string& in, std::string& out) {
 namespace {
 HttpResponse httpRequest(const char* method, const std::string& url, const std::string& body,
                          const std::vector<std::pair<std::string, std::string>>& headers,
-                         int timeout_sec);
+                         int timeout_sec, const std::function<void(const std::string&)>* on_body = nullptr);
+}
+
+HttpResponse httpPostStream(const std::string& url, const std::string& body,
+                            const std::vector<std::pair<std::string, std::string>>& headers, int timeout_sec,
+                            const std::function<void(const std::string&)>& on_body) {
+    return httpRequest("POST", url, body, headers, timeout_sec, &on_body);
 }
 
 HttpResponse httpPost(const std::string& url, const std::string& body,
@@ -169,7 +175,7 @@ HttpResponse httpGet(const std::string& url, int timeout_sec) {
 namespace {
 HttpResponse httpRequest(const char* method, const std::string& url, const std::string& body,
                          const std::vector<std::pair<std::string, std::string>>& headers,
-                         int timeout_sec) {
+                         int timeout_sec, const std::function<void(const std::string&)>* on_body) {
     HttpResponse r;
     Url u;
     if (!parseUrl(url, u)) {
@@ -197,6 +203,34 @@ HttpResponse httpRequest(const char* method, const std::string& url, const std::
 
     std::string raw;
     char buf[16384];
+    // Streaming: once the headers are in, hand over body bytes as they come (de-chunked).
+    size_t body_at = std::string::npos, scan = 0;
+    bool chunked = false;
+    std::string streamed;
+    auto pump = [&]() {
+        if (!on_body) return;
+        if (body_at == std::string::npos) {
+            auto he = raw.find("\r\n\r\n");
+            if (he == std::string::npos) return;
+            body_at = scan = he + 4;
+            chunked = lower(raw.substr(0, he)).find("transfer-encoding: chunked") != std::string::npos;
+        }
+        if (!chunked) {
+            if (scan < raw.size()) { std::string piece = raw.substr(scan); scan = raw.size(); streamed += piece; (*on_body)(piece); }
+            return;
+        }
+        for (;;) {
+            auto eol = raw.find("\r\n", scan);
+            if (eol == std::string::npos) return;
+            size_t n = std::strtoul(raw.substr(scan, eol - scan).c_str(), nullptr, 16);
+            if (n == 0) return;
+            if (raw.size() < eol + 2 + n + 2) return;  // the rest of this chunk isn't here yet
+            std::string piece = raw.substr(eol + 2, n);
+            scan = eol + 2 + n + 2;
+            streamed += piece;
+            (*on_body)(piece);
+        }
+    };
     for (;;) {
         long n = conn.read(buf, sizeof buf);
         if (n < 0 && errno == EINTR) continue;  // a signal, not a network error
@@ -206,6 +240,7 @@ HttpResponse httpRequest(const char* method, const std::string& url, const std::
         }
         if (n == 0) break;
         raw.append(buf, size_t(n));
+        pump();
     }
     auto hdr_end = raw.find("\r\n\r\n");
     if (hdr_end == std::string::npos) {

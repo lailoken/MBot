@@ -102,7 +102,27 @@ bool VectorClient::say(const std::string& text, float duration_scalar, float pit
     req.set_pitch_scalar(pitch);
     vpb::SayTextResponse resp;
     auto c = ctx(60);
-    return rpcOk(stub_->SayText(c.get(), req, &resp), "SayText");
+    { std::lock_guard<std::mutex> lk(say_mu_); say_ctx_ = c.get(); }
+    auto st = stub_->SayText(c.get(), req, &resp);
+    { std::lock_guard<std::mutex> lk(say_mu_); say_ctx_ = nullptr; }
+    if (st.error_code() == grpc::StatusCode::CANCELLED) return false;  // interrupted on purpose
+    return rpcOk(st, "SayText");
+}
+
+void VectorClient::cancelSay() {
+    std::lock_guard<std::mutex> lk(say_mu_);
+    if (say_ctx_) say_ctx_->TryCancel();
+}
+
+bool VectorClient::cameraConfig(float& focal_x, float& center_x, float& fov_x_deg) {
+    vpb::CameraConfigRequest req;
+    vpb::CameraConfigResponse resp;
+    auto c = ctx(5);
+    if (!rpcOk(stub_->GetCameraConfig(c.get(), req, &resp), "GetCameraConfig")) return false;
+    focal_x = resp.focal_length_x();
+    center_x = resp.center_x();
+    fov_x_deg = resp.fov_x();
+    return focal_x > 0;
 }
 
 bool VectorClient::setHeadDeg(float deg) {

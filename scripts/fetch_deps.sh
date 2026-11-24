@@ -4,6 +4,7 @@
 #   ./scripts/fetch_deps.sh            all of it
 #   NO_VOICE_ID=1 ./scripts/fetch_deps.sh   skip sherpa-onnx + speaker model (voice recognition off)
 #   WHISPER_BASE=1 ./scripts/fetch_deps.sh  also fetch the smaller ggml-base.en model
+#   NO_MODELS=1 ./scripts/fetch_deps.sh     sources only (the brain downloads its models when first needed)
 set -e
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 TP="$ROOT/third_party"
@@ -33,8 +34,8 @@ pinned vector-cloud https://github.com/digital-dream-labs/vector-cloud.git bba1d
 mkdir -p "$TP/vector-cloud/cmd/mictap"
 
 # Whisper speech-to-text weights (MIT, OpenAI; converted by the ggml project)
-fetch https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin "$MODELS/ggml-small.en.bin"
-[ -n "$WHISPER_BASE" ] && fetch https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin "$MODELS/ggml-base.en.bin"
+[ -z "$NO_MODELS" ] && fetch https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin "$MODELS/ggml-small.en.bin"
+[ -z "$NO_MODELS" ] && [ -n "$WHISPER_BASE" ] && fetch https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin "$MODELS/ggml-base.en.bin"
 
 if [ -z "$NO_VOICE_ID" ]; then
   # sherpa-onnx C API + ONNX Runtime, prebuilt (Apache-2.0 / MIT)
@@ -55,7 +56,7 @@ if [ -z "$NO_VOICE_ID" ]; then
     echo "sherpa-onnx: present"
   fi
   # WeSpeaker CAM++ speaker model (Apache-2.0; trained on VoxCeleb, CC BY 4.0)
-  fetch "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_CAM++_LM.onnx" \
+  [ -z "$NO_MODELS" ] && fetch "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_CAM++_LM.onnx" \
         "$MODELS/speaker-campplus-en.onnx"
 fi
 echo "done. Next: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j"

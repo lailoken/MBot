@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -18,5 +19,10 @@ HttpResponse httpPost(const std::string& url, const std::string& body,
                       const std::vector<std::pair<std::string, std::string>>& headers,
                       int timeout_sec = 120);
 HttpResponse httpGet(const std::string& url, int timeout_sec = 10);
+// Like httpPost, but hands the response body to on_body as it arrives (e.g. server-sent events).
+// The whole body is still returned at the end.
+HttpResponse httpPostStream(const std::string& url, const std::string& body,
+                            const std::vector<std::pair<std::string, std::string>>& headers, int timeout_sec,
+                            const std::function<void(const std::string&)>& on_body);
 
 }  // namespace mbot

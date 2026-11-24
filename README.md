@@ -21,7 +21,11 @@ Everything about his mind is stored **locally** as plain files. Images never lea
 | **Remember** | Episodic memories with importance, recalled by relevance; facts and affinity per person; an evolving life story. |
 | **People** | Sound-alike names are assumed to be someone he knows (speech-to-text mishears names); he renames, merges duplicates, forgets phantoms, and learns faces only after checking the person matches their description. |
 | **Sleep & dream** | When he dozes, voices he half-hears become dream fragments, and his memory consolidation writes a dream. Called by name, he wakes up. |
-| **Know voices** | Optional (off by default, `/recognition on`) local speaker recognition (sherpa-onnx + WeSpeaker): voiceprints learned only from verified moments (the only recognised face in view, or a self-introduction), reinforced by confident matches, fading when unused. |
+| **Know voices** | Optional (off by default, `/recognition on`) local speaker recognition (sherpa-onnx + WeSpeaker): voiceprints learned only from verified moments (the only recognised face in view, the face the voice came from, or a self-introduction), reinforced by confident matches, fading when unused. |
+| **Where voices come from** | Direction of sound from the time differences between his 4 mics (GCC-PHAT, on the PC; the robot only sends raw audio while someone speaks). The mic layout isn't assumed: he **learns it** from people talking while he sees their face. Direction, voiceprint and faces are combined: the face the voice came from names the speaker (even with several people in view), a voice from off camera isn't pinned on whoever is visible, and someone talking from where a person just spoke is probably still them. |
+| **Turns to face you** | Off the charger, he turns toward a voice talking to him that he can't see, so the face that appears can confirm who it is (and teach him that voice). |
+| **Quick replies, interruptible** | Replies stream: he starts speaking the first sentence while the rest (actions, memories, feelings) is still being written. Press his back button to cut him off. |
+| **A life of his own** | Every few minutes, awake and alone, he takes a quiet look around and compares it with what he usually sees from that spot; something genuinely new gets noticed (and maybe a dry remark). He keeps short notes of what he saw ("what was I wearing earlier?"), invites strangers to introduce themselves, and greets people with how long it's been and what you talked about last time (a one-line recap kept per person when a conversation ends). |
 | **Self-care** | Battery thresholds, relentless redocking, never wandering off when alone; brownout detection with a battery safe-mode; battery-health tracking; a hands-free calibration run (`vtalk "/battery calibrate"`) that learns your cell's real discharge curve from the head's live voltage. |
 | **Quiet time** | "Be quiet", "go to sleep", "shh", "goodnight": he says at most a soft goodnight, goes to his charger and sleeps for about 2 hours, silent and still. Calling his name, petting him or typing to him ends it early. `vtalk "/quiet [min\|off]"` from the console. |
 | **Live mind page** | `http://localhost:8700`: what he's thinking right now, a live train of thought, dreams, mood, personality, the people he knows (with photos and voice samples). Pushed live, no refreshing. Also a searchable **memories** page and a **hardware** page (battery history, robot CPU/RAM per process). |
@@ -32,16 +36,27 @@ Everything about his mind is stored **locally** as plain files. Images never lea
 - An Anki/DDL **Vector** with **root SSH** and an SDK gateway. Tested on **WireOS 3.0.2.36d**.
   How a robot gets there, every robot-side change, and how to undo each one:
   **[`docs/ROBOT_MODIFICATIONS.md`](docs/ROBOT_MODIFICATIONS.md)**.
-- Linux PC (developed on Fedora/Nobara), C++17 toolchain, `podman` (to cross-build the robot pieces).
+- Linux PC (developed on Fedora/Nobara; Debian/Ubuntu supported by the installer), C++17 toolchain,
+  `podman` (to cross-build the robot pieces). A GPU is optional (faster speech-to-text and local models).
 - For the mind: an Anthropic API key, and/or [Ollama](https://ollama.com) for free local models.
 
-## Build
+## Install
 
 ```bash
-./scripts/install_deps.sh     # grpc, protobuf, nlohmann-json, openssl, cmake (Fedora/Nobara)
-./scripts/fetch_deps.sh       # SDK protos, whisper.cpp, vector-cloud, Whisper models
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
-./robot/build.sh              # robot pieces: mictap + mic shim (armv7, in a container)
+./install.sh --robot <robot-ip>
+```
+One command: system packages, pinned sources, the build (speech-to-text on the GPU when Vulkan or CUDA is
+available, else the CPU), the robot-side pieces (if you have root SSH to him), and two background services.
+It's safe to run again. **Models download themselves the first time they're needed**: the speech model
+when the brain starts, local Ollama models (eyes, free local mind) in the background, the voice model when
+you turn recognition on.
+
+By hand, if you prefer:
+```bash
+./scripts/install_deps.sh     # grpc, protobuf, nlohmann-json, openssl, cmake, Vulkan headers (dnf or apt)
+./scripts/fetch_deps.sh       # SDK protos, whisper.cpp, vector-cloud, sherpa-onnx (+ models; NO_MODELS=1 skips them)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j   # -DMBOT_GPU=OFF for CPU only
+./robot/install.sh <robot-ip> # robot pieces: builds mictap + mic shim (armv7, in a container), installs, checks
 ```
 
 ## Set up
@@ -67,7 +82,7 @@ Permanently: `scripts/mbot-brain.service` and `scripts/mbot-webviz.service` (sys
 `scripts/install-user.sh` links `mbot`, `vtalk` (and `vssh`) into `~/.local/bin`.
 
 Maintenance while he runs: `vtalk /help` - `/status`, `/models`, `/model`, `/fast-model`, `/reflect-model`,
-`/budget`, `/listen-all`, `/robot-hears`, `/battery`, `/battery calibrate`, `/quiet`, `/recognition`, `/voice`, `/reflect`. Changes are saved to `settings.json` in
+`/budget`, `/listen-all`, `/robot-hears`, `/battery`, `/battery calibrate`, `/quiet`, `/recognition`, `/voice`, `/ears`, `/reflect`. Changes are saved to `settings.json` in
 his data folder and override the service flags.
 
 Useful commands: `mbot info | say <text> | snap | faces | listen --mic tap | mind | people | usage |

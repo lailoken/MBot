@@ -22,6 +22,8 @@
 #include <thread>
 #include <vector>
 
+#include "doa.hpp"
+
 struct whisper_context;
 
 namespace mbot {
@@ -31,6 +33,7 @@ struct Heard {
     float seconds = 0;      // length of the utterance
     float loudness = 0;     // mean RMS
     std::shared_ptr<const std::vector<float>> audio;  // the utterance itself (16 kHz), kept in memory only
+    DoaObs doa;             // where it came from (time differences between his 4 mics), if measured
 };
 
 class Ears {
@@ -51,6 +54,8 @@ public:
     // triggered, works anywhere Vector roams). Disables the PC mic / :8193 source.
     void setTapMode(int port = 9099) { use_tap_ = true; tap_port_ = port; }
     // Words to bias recognition toward (household names, "Vector") - whisper's initial prompt.
+    // Direction of sound: raw 4-channel snippets while someone speaks (robot's mictap :9098).
+    void setDirectionFinder(DirectionFinder* d) { dir_ = d; }
     void setVocabulary(const std::string& v) { std::lock_guard<std::mutex> lk(vocab_mu_); vocab_ = v; }
 
     // Ignore the mic while Vector itself is talking/animating (it hears itself).
@@ -112,7 +117,10 @@ private:
     std::mutex vocab_mu_;
     std::string vocab_;
     std::condition_variable qcv_;
-    std::deque<std::pair<std::vector<float>, float>> queue_;  // (audio, loudness)
+    struct Pending { std::vector<float> audio; float loudness; DoaCapture dir; };
+    std::deque<Pending> queue_;
+    DirectionFinder* dir_ = nullptr;
+    bool dir_open_ = false;  // net thread only
 };
 
 }  // namespace mbot

@@ -3,6 +3,7 @@
 #include <openssl/evp.h>
 
 #include <chrono>
+#include <algorithm>
 #include <ctime>
 #include <mutex>
 #include <cstdio>
@@ -11,6 +12,9 @@
 #include "net.hpp"
 
 namespace mbot {
+
+static thread_local std::function<void(const std::string&)> t_partial;
+void setPartialReplyCallback(std::function<void(const std::string&)> cb) { t_partial = std::move(cb); }
 
 std::string base64(const std::string& bytes) {
     std::string out(4 * ((bytes.size() + 2) / 3) + 1, '\0');
@@ -50,6 +54,40 @@ bool extractJsonObject(const std::string& text, json& out) {
 }
 
 namespace {
+
+// JSON objects here sort their keys, but a model writes a structured reply in the order the schema lists
+// its properties. Dump a schema with each "properties" in the order of its "required" list (the order
+// the code declares), so e.g. "thought" and "say" come first and speech can start early.
+std::string dumpSchemaOrdered(const json& j) {
+    if (j.is_array()) {
+        std::string o = "[";
+        for (size_t i = 0; i < j.size(); ++i) o += (i ? "," : "") + dumpSchemaOrdered(j[i]);
+        return o + "]";
+    }
+    if (!j.is_object()) return j.dump();
+    std::vector<std::string> req;
+    if (j.contains("required") && j["required"].is_array())
+        for (auto& r : j["required"]) if (r.is_string()) req.push_back(r.get<std::string>());
+    std::string o = "{";
+    bool first = true;
+    for (auto& [k, v] : j.items()) {
+        o += (first ? "" : ",") + json(k).dump() + ":";
+        first = false;
+        if (k == "properties" && v.is_object() && !req.empty()) {
+            std::vector<std::string> keys;
+            for (auto& r : req) if (v.contains(r)) keys.push_back(r);
+            for (auto& [pk, pv] : v.items())
+                if (std::find(keys.begin(), keys.end(), pk) == keys.end()) keys.push_back(pk);
+            o += "{";
+            for (size_t i = 0; i < keys.size(); ++i) o += (i ? "," : "") + json(keys[i]).dump() + ":" + dumpSchemaOrdered(v[keys[i]]);
+            o += "}";
+        } else {
+            o += dumpSchemaOrdered(v);
+        }
+    }
+    return o + "}";
+}
+
 
 const char* envOr(const char* k);
 
@@ -183,9 +221,9 @@ public:
                                      // default 5-minute cache would be re-written on almost every call.
                                      {"cache_control", {{"type", "ephemeral"}, {"ttl", "1h"}}}}})},
             {"messages", jm},
-            {"output_config",
-             {{"effort", effort_}, {"format", {{"type", "json_schema"}, {"schema", schema}}}}},
         };
+        bool streaming = bool(t_partial) && !deep_;
+        if (streaming) body["stream"] = true;
         // Hidden "thinking" is billed as output tokens. A robot's quick reaction doesn't
         // need it: turn it off where the model allows (Sonnet 5.5: between_tools,
         // Haiku 5.5: disabled; both only at effort high or below - we use low).
@@ -213,7 +251,13 @@ public:
                                                         : "https://api.anthropic.com";
 
         if (headers[1].second.empty()) headers.erase(headers.begin() + 1);
-        auto r = httpPost(base + "/v1/messages", body.dump(), headers, deep_ ? 300 : 180);
+        // output_config goes in by hand: the schema must keep its property order (see dumpSchemaOrdered).
+        std::string payload = body.dump();
+        payload.pop_back();
+        payload += ",\"output_config\":{\"effort\":" + json(effort_).dump() +
+                   ",\"format\":{\"type\":\"json_schema\",\"schema\":" + dumpSchemaOrdered(schema) + "}}}";
+        if (streaming) return completeStreamed(base, payload, headers, out, err);
+        auto r = httpPost(base + "/v1/messages", payload, headers, deep_ ? 300 : 180);
         if (!r.error.empty()) {
             if (err) *err = r.error;
             return false;
@@ -251,6 +295,59 @@ public:
     }
 
 private:
+    // Server-sent events: text deltas go to the partial callback as they arrive.
+    bool completeStreamed(const std::string& base, const std::string& payload,
+                          const std::vector<std::pair<std::string, std::string>>& headers, json& out, std::string* err) {
+        std::string pend, text, stop, model = model_, sse_err;
+        json usage = json::object();
+        auto on_body = [&](const std::string& piece) {
+            pend += piece;
+            size_t nl;
+            while ((nl = pend.find('\n')) != std::string::npos) {
+                std::string line = pend.substr(0, nl);
+                pend.erase(0, nl + 1);
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                if (line.rfind("data:", 0) != 0) continue;
+                json ev;
+                try { ev = json::parse(line.substr(5)); } catch (...) { continue; }
+                std::string type = ev.value("type", "");
+                if (type == "message_start") {
+                    auto m = ev.value("message", json::object());
+                    model = m.value("model", model_);
+                    json u = m.value("usage", json::object());  // named: items() on a temporary dangles
+                    for (auto& [k, v] : u.items()) if (v.is_number()) usage[k] = v;
+                } else if (type == "content_block_delta") {
+                    auto d = ev.value("delta", json::object());
+                    if (d.value("type", "") == "text_delta") {
+                        text += d.value("text", "");
+                        if (t_partial) t_partial(text);
+                    }
+                } else if (type == "message_delta") {
+                    stop = ev.value("delta", json::object()).value("stop_reason", stop);
+                    json u = ev.value("usage", json::object());
+                    for (auto& [k, v] : u.items()) if (v.is_number()) usage[k] = v;
+                } else if (type == "error") {
+                    sse_err = ev.value("error", json::object()).value("message", "stream error");
+                }
+            }
+        };
+        auto r = httpPostStream(base + "/v1/messages", payload, headers, 180, on_body);
+        if (!r.error.empty()) { if (err) *err = r.error; return false; }
+        if (r.status != 200) {
+            std::string msg = r.body.substr(0, 300);
+            try { msg = json::parse(r.body).value("error", json::object()).value("message", msg); } catch (...) {}
+            if (err) *err = "HTTP " + std::to_string(r.status) + ": " + msg;
+            return false;
+        }
+        if (!sse_err.empty()) { if (err) *err = sse_err; return false; }
+        if (!usage.empty()) last_cost_ = recordUsage(model, usage);
+        if (stop == "refusal") { if (err) *err = "model declined this turn"; return false; }
+        try { out = json::parse(text); return true; } catch (...) {}
+        if (extractJsonObject(text, out)) return true;
+        if (err) *err = "no JSON in streamed reply (stop_reason " + stop + ")";
+        return false;
+    }
+
     std::string model_, effort_;
     bool deep_ = false;
     double last_cost_ = 0;

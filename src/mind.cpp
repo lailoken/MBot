@@ -677,6 +677,26 @@ size_t Mind::memoryCount() const {
     return memories_.size();
 }
 
+int64_t Mind::lastSeen(const std::string& raw) const {
+    std::string name = canonicalName(raw);
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = people_.find(name);
+    return it == people_.end() ? 0 : it->second.last_seen;
+}
+
+std::string Mind::latestMemory(const std::string& raw, const std::string& kind, const std::string& prefix,
+                               int64_t* when) const {
+    std::string name = canonicalName(raw);
+    std::lock_guard<std::mutex> lk(mu_);
+    for (auto it = memories_.rbegin(); it != memories_.rend(); ++it) {
+        if (it->kind != kind || it->text.rfind(prefix, 0) != 0) continue;
+        if (std::find(it->people.begin(), it->people.end(), name) == it->people.end()) continue;
+        if (when) *when = it->time;
+        return it->text;
+    }
+    return "";
+}
+
 void Mind::sawPerson(const std::string& raw) {
     if (!isRealName(raw) || raw == name_) return;
     std::string name = canonicalName(raw);

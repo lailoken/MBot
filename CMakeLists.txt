@@ -72,6 +72,26 @@ set(WHISPER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(WHISPER_BUILD_SERVER OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+# Speech-to-text on the GPU when the machine can: Vulkan (any vendor; needs the Vulkan headers/loader and
+# glslc) or CUDA (needs nvcc). MBOT_GPU=OFF forces CPU. At run time the brain falls back to the CPU anyway
+# if the GPU can't be used.
+set(MBOT_GPU "AUTO" CACHE STRING "Whisper on the GPU: AUTO, VULKAN, CUDA or OFF")
+if(NOT MBOT_GPU STREQUAL "OFF")
+  find_package(Vulkan QUIET)
+  find_package(SPIRV-Headers CONFIG QUIET)
+  find_program(GLSLC_EXE glslc)
+  find_program(NVCC_EXE nvcc)
+  if((MBOT_GPU STREQUAL "AUTO" OR MBOT_GPU STREQUAL "VULKAN") AND Vulkan_FOUND AND GLSLC_EXE AND SPIRV-Headers_FOUND)
+    set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+    message(STATUS "speech-to-text: GPU (Vulkan)")
+  elseif((MBOT_GPU STREQUAL "AUTO" OR MBOT_GPU STREQUAL "CUDA") AND NVCC_EXE)
+    set(GGML_CUDA ON CACHE BOOL "" FORCE)
+    message(STATUS "speech-to-text: GPU (CUDA)")
+  else()
+    message(STATUS "speech-to-text: CPU (for the GPU install the Vulkan headers + loader, glslc and SPIR-V "
+                   "headers - scripts/install_deps.sh does - or CUDA)")
+  endif()
+endif()
 if(NOT EXISTS ${CMAKE_SOURCE_DIR}/third_party/whisper.cpp/CMakeLists.txt)
   message(FATAL_ERROR "whisper.cpp missing. Run scripts/fetch_deps.sh first.")
 endif()
@@ -88,6 +108,8 @@ add_executable(mbot
   src/mind.cpp
   src/ears.cpp
   src/voice_id.cpp
+  src/doa.cpp
+  src/provision.cpp
   src/brain.cpp)
 target_compile_options(mbot PRIVATE -Wall -Wextra)
 target_link_libraries(mbot PRIVATE vector_proto whisper OpenSSL::SSL OpenSSL::Crypto
