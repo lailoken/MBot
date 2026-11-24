@@ -13,8 +13,8 @@
 
 namespace mbot {
 
-static thread_local std::function<void(const std::string&)> t_partial;
-void setPartialReplyCallback(std::function<void(const std::string&)> cb) { t_partial = std::move(cb); }
+static thread_local std::function<bool(const std::string&)> t_partial;
+void setPartialReplyCallback(std::function<bool(const std::string&)> cb) { t_partial = std::move(cb); }
 
 std::string base64(const std::string& bytes) {
     std::string out(4 * ((bytes.size() + 2) / 3) + 1, '\0');
@@ -300,6 +300,7 @@ private:
                           const std::vector<std::pair<std::string, std::string>>& headers, json& out, std::string* err) {
         std::string pend, text, stop, model = model_, sse_err;
         json usage = json::object();
+        bool superseded = false;
         auto on_body = [&](const std::string& piece) {
             pend += piece;
             size_t nl;
@@ -320,7 +321,7 @@ private:
                     auto d = ev.value("delta", json::object());
                     if (d.value("type", "") == "text_delta") {
                         text += d.value("text", "");
-                        if (t_partial) t_partial(text);
+                        if (t_partial && !t_partial(text)) { superseded = true; return false; }
                     }
                 } else if (type == "message_delta") {
                     stop = ev.value("delta", json::object()).value("stop_reason", stop);
@@ -330,8 +331,14 @@ private:
                     sse_err = ev.value("error", json::object()).value("message", "stream error");
                 }
             }
+            return true;
         };
         auto r = httpPostStream(base + "/v1/messages", payload, headers, 180, on_body);
+        if (superseded) {  // still billed for what was read and written so far
+            if (!usage.empty()) last_cost_ = recordUsage(model, usage);
+            if (err) *err = "superseded";
+            return false;
+        }
         if (!r.error.empty()) { if (err) *err = r.error; return false; }
         if (r.status != 200) {
             std::string msg = r.body.substr(0, 300);
@@ -446,6 +453,7 @@ public:
                 degraded_ = false;
                 return true;
             }
+            if (e == "superseded") { if (err) *err = e; return false; }  // abandoned on purpose, not broken
             bool auth = e.find("HTTP 401") != std::string::npos || e.find("HTTP 403") != std::string::npos ||
                         e.find("no ANTHROPIC") != std::string::npos;
             // Bad credentials won't fix themselves quickly; network blips might.

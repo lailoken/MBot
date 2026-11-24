@@ -77,7 +77,8 @@ std::string base64(const std::string& bytes);
 
 // While set (on this thread), Claude calls stream: the callback gets the reply text so far as it is written.
 // The brain uses it to start speaking a reply before the whole reply (actions, memories...) is done.
-void setPartialReplyCallback(std::function<void(const std::string&)> cb);
+// Return false from it to abandon the call: complete() then fails with err "superseded".
+void setPartialReplyCallback(std::function<bool(const std::string&)> cb);
 
 // Describe a JPEG with a LOCAL vision model (free; e.g. minicpm-v on Ollama). Returns a
 // short text description, or "" with *err set. Keeps images off the paid/interactive mind.

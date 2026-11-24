@@ -40,6 +40,15 @@ Everything about his mind is stored **locally** as plain files. Images never lea
   `podman` (to cross-build the robot pieces). A GPU is optional (faster speech-to-text and local models).
 - For the mind: an Anthropic API key, and/or [Ollama](https://ollama.com) for free local models.
 
+**GPU or not.** Everything runs on a CPU-only PC. A GPU just makes some parts faster:
+
+| Part | CPU only | With a GPU |
+|---|---|---|
+| Speech-to-text (Whisper small) | ~0.5-1 s per sentence (6 threads) | ~0.1-0.2 s; built automatically when the Vulkan headers/loader + `glslc` + SPIR-V headers (any GPU vendor) or CUDA are installed. `-DMBOT_GPU=OFF` forces CPU; `MBOT_WHISPER_CPU=1` uses the CPU at run time; with no usable GPU it falls back by itself |
+| His eyes (local vision model via Ollama) | works, several seconds per look | ~1-3 s (Ollama uses the GPU on its own) |
+| Free local mind (Ollama) | slow but works; Claude is the quick option | quick |
+| Direction of sound, voice recognition, memory | CPU (light) | same |
+
 ## Install
 
 ```bash

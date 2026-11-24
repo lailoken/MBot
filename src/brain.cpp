@@ -924,9 +924,10 @@ private:
         SpeechDir dir;
         {
             std::lock_guard<std::mutex> lk(speech_mu_);
-            if (speech_buf_.empty() || Clock::now() - speech_at_ < std::chrono::milliseconds(900)) return;
+            if (speech_buf_.empty() || Clock::now() - speech_at_ < std::chrono::milliseconds(350)) return;
             if (ears_ && ears_->hearingSpeech()) return;  // they're still talking
             text.swap(speech_buf_);
+            last_flush_raw_ = text;
             pcm.swap(speech_pcm_);
             dir = speech_dir_;
             speech_dir_ = {};
@@ -1377,32 +1378,45 @@ private:
     }
     // Speak each finished sentence of "say" while the rest of the reply is still being written (only once
     // "escalate" is "none": a moment handed to a stronger mind must not be half-answered by this one).
-    void streamSpeech(const std::string& t) {
-        if (interrupted_.load()) return;
+    bool newSpeechWaiting() {
+        std::lock_guard<std::mutex> lk(speech_mu_);
+        return !speech_buf_.empty();
+    }
+    // Returns false to abandon the reply: they went on talking before he said anything.
+    bool streamSpeech(const std::string& t) {
+        if (streamed_said_.empty() && newSpeechWaiting()) return false;
+        if (interrupted_.load()) return true;
         std::string esc, say;
         bool ed = false, sd = false;
-        if (!partialField(t, "escalate", esc, ed) || !ed || esc != "none") return;
-        if (!partialField(t, "say", say, sd) || say.size() <= streamed_said_.size()) return;
-        if (say.compare(0, streamed_said_.size(), streamed_said_) != 0) return;
+        if (!partialField(t, "escalate", esc, ed) || !ed || esc != "none") return true;
+        if (!partialField(t, "say", say, sd) || say.size() <= streamed_said_.size()) return true;
+        if (say.compare(0, streamed_said_.size(), streamed_said_) != 0) return true;
         std::string rest = say.substr(streamed_said_.size());
         size_t cut = std::string::npos;
         if (sd) cut = rest.size();
         else
             for (size_t i = 8; i + 1 < rest.size(); ++i)
                 if ((rest[i] == '.' || rest[i] == '!' || rest[i] == '?') && rest[i + 1] == ' ') cut = i + 1;
-        if (cut == std::string::npos) return;
+        if (cut == std::string::npos) return true;
+        if (streamed_said_.empty()) {
+            // About to start talking: if they're mid-word right now, give them a moment, then let new words win.
+            for (int i = 0; i < 15 && ears_ && ears_->hearingSpeech(); ++i)
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (newSpeechWaiting()) return false;
+        }
         std::string chunk = rest.substr(0, cut);
         streamed_said_ += chunk;
         auto b = chunk.find_first_not_of(' ');
-        if (b == std::string::npos) return;
+        if (b == std::string::npos) return true;
         chunk = chunk.substr(b);
         if (!stream_body_) {
-            if (!takeBody()) { interrupted_ = true; return; }
+            if (!takeBody()) { interrupted_ = true; return true; }
             stream_body_ = true;
             if (ears_) ears_->setMuted(true);
         }
         std::printf("[say ~] %s\n", chunk.c_str());
         speak(limitNameAddress(chunk));
+        return true;
     }
     void endStreamBody() {
         if (!stream_body_) return;
@@ -2449,9 +2463,17 @@ private:
         current_stimulus_ = s.text;
         current_kind_ = s.kind;
         bool stream = (s.kind == Stimulus::Speech || s.kind == Stimulus::Typed) && !hushStrict();
-        if (stream) setPartialReplyCallback([this](const std::string& t) { streamSpeech(t); });
+        if (stream) setPartialReplyCallback([this](const std::string& t) { return streamSpeech(t); });
         bool thought_ok = mind->complete(systemPrompt(), {{"user", user, ""}}, replySchema(), r, &err);
         setPartialReplyCallback(nullptr);
+        if (!thought_ok && err == "superseded") {  // they kept talking: answer all of it together
+            std::lock_guard<std::mutex> lk(speech_mu_);
+            speech_buf_ = last_flush_raw_ + (speech_buf_.empty() ? "" : " ") + speech_buf_;
+            speech_at_ = Clock::now();
+            std::printf("[mind] (they kept talking - waiting for the rest before answering)\n");
+            endStreamBody();
+            return;
+        }
         if (!thought_ok) {
             std::fprintf(stderr, "[mind] thinking failed: %s\n", err.c_str());
             endStreamBody();
@@ -2469,9 +2491,17 @@ private:
                                     "\"escalate\" to \"none\").\n" + situation(s, sceneDesc);
                 json r2;
                 std::string err2;
-                if (stream) setPartialReplyCallback([this](const std::string& t) { streamSpeech(t); });
+                if (stream) setPartialReplyCallback([this](const std::string& t) { return streamSpeech(t); });
                 bool ok2 = stronger->complete(systemPrompt(), {{"user", user2, ""}}, replySchema(), r2, &err2);
                 setPartialReplyCallback(nullptr);
+                if (!ok2 && err2 == "superseded") {
+                    std::lock_guard<std::mutex> lk(speech_mu_);
+                    speech_buf_ = last_flush_raw_ + (speech_buf_.empty() ? "" : " ") + speech_buf_;
+                    speech_at_ = Clock::now();
+                    std::printf("[mind] (they kept talking - waiting for the rest before answering)\n");
+                    endStreamBody();
+                    return;
+                }
                 if (ok2) {
                     r = r2;
                     mind = stronger;
@@ -4246,6 +4276,7 @@ private:
     // ---- talking: interruptible (his back button), and a reply can start before it's fully written
     std::atomic<bool> speaking_{false}, interrupted_{false};
     std::string streamed_said_;  // the part of the current reply already spoken (main thread)
+    std::string last_flush_raw_;  // what they said, as handed to the mind (to re-queue if they keep talking)
     bool stream_body_ = false;
     bool button_ = false;
     // ---- life between conversations

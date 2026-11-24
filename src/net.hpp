@@ -23,6 +23,6 @@ HttpResponse httpGet(const std::string& url, int timeout_sec = 10);
 // The whole body is still returned at the end.
 HttpResponse httpPostStream(const std::string& url, const std::string& body,
                             const std::vector<std::pair<std::string, std::string>>& headers, int timeout_sec,
-                            const std::function<void(const std::string&)>& on_body);
+                            const std::function<bool(const std::string&)>& on_body);  // return false to stop (error "aborted")
 
 }  // namespace mbot

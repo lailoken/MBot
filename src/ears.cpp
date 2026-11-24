@@ -405,7 +405,9 @@ void Ears::onFrame(const int16_t* s, size_t n, uint32_t rate) {
     rms_sum_ += rms;
     rms_n_++;
     quiet_run_ = loud ? 0 : quiet_run_ + 1;
-    bool ended = quiet_run_ >= 120;                // 1.2 s of quiet: people pause mid-sentence
+    // 0.7 s of quiet ends a piece. People pause mid-sentence, so the brain joins pieces, starts thinking
+    // early, and drops a half-made reply if more words come before it speaks.
+    bool ended = quiet_run_ >= 70;
     bool too_long = utter_.size() > 16000 * 15;    // 15 s cap
     if (ended || too_long) {
         float secs = float(utter_.size()) / 16000.f;
