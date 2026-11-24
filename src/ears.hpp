@@ -56,6 +56,9 @@ public:
     // Words to bias recognition toward (household names, "Vector") - whisper's initial prompt.
     // Direction of sound: raw 4-channel snippets while someone speaks (robot's mictap :9098).
     void setDirectionFinder(DirectionFinder* d) { dir_ = d; }
+    // Called (from the audio thread) when the robot's mic stream has been connected but silent - no bytes at
+    // all - for a minute: the robot side needs a kick. The brain restarts the streamer on the robot.
+    void setStallHandler(std::function<void()> h) { on_stall_ = std::move(h); }
     void setVocabulary(const std::string& v) { std::lock_guard<std::mutex> lk(vocab_mu_); vocab_ = v; }
 
     // Ignore the mic while Vector itself is talking/animating (it hears itself).
@@ -84,7 +87,11 @@ private:
     int port_;
     std::string model_path_;
     int threads_;
-    whisper_context* wctx_ = nullptr;
+    whisper_context* wctx_ = nullptr;   // used by the STT thread only (and before it starts)
+    bool gpu_wanted_ = false, on_gpu_ = false;
+    std::chrono::steady_clock::time_point last_gpu_try_{};
+    void maybeMoveToGpu();
+    void warmUp();              // STT thread: retry the GPU after a fallback (e.g. VRAM was full)
     std::function<void(const Heard&)> on_heard_;
     std::function<void(const std::string&)> log_;
     std::string save_dir_;
@@ -120,6 +127,8 @@ private:
     struct Pending { std::vector<float> audio; float loudness; DoaCapture dir; };
     std::deque<Pending> queue_;
     DirectionFinder* dir_ = nullptr;
+    std::function<void()> on_stall_;
+    int64_t silent_since_ms_ = 0;  // tap thread: when bytes last stopped arriving (0 = flowing)
     bool dir_open_ = false;  // net thread only
 };
 

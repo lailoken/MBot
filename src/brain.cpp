@@ -393,6 +393,18 @@ public:
             }
             std::string err;
             ears_->setLogger([this](const std::string& m) { earsLog(m); });
+            ears_->setStallHandler([this] {
+                auto now = Clock::now();
+                if (now - last_mic_repair_ < std::chrono::minutes(5) || mic_repairing_.exchange(true)) return;
+                last_mic_repair_ = now;
+                std::printf("[ears] his mic stream is connected but silent - restarting the mic streamer on the robot\n");
+                std::thread([this] {
+                    std::string out = shellRobot("systemctl restart mictap && echo restarted");
+                    std::printf("[ears] mic streamer: %s\n", out.find("restarted") != std::string::npos ? "restarted"
+                                : "couldn't restart it (no SSH to the robot?)");
+                    mic_repairing_ = false;
+                }).detach();
+            });
             if (opt_.save_ears) {  // opt-in: keep the last 10 heard segments as WAVs (debugging only)
                 std::filesystem::create_directories(mind_dir_ + "/ears");
                 ears_->saveSegmentsTo(mind_dir_ + "/ears");
@@ -1497,6 +1509,8 @@ private:
         }
     }
     std::atomic<bool> voice_dl_busy_{false}, voice_dl_done_{false};
+    Clock::time_point last_mic_repair_{};
+    std::atomic<bool> mic_repairing_{false};
     std::string loadVoiceId() {
         if (voice_.ready()) return "";
         std::string verr, sm = opt_.speaker_model;

@@ -186,41 +186,63 @@ func (r *rawProc) process(pkt []byte, out []byte) []byte {
 	return out
 }
 
+// rawLoop receives the shim's raw mic packets. Self-repairing: if the socket file disappears or is replaced
+// (another program took the path), or packets stop for a while, it makes a fresh socket.
 func rawLoop() {
-	os.Remove(rawPath)
-	conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: rawPath, Net: "unixgram"})
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "[raw] listen error:", err)
-		return
-	}
-	os.Chmod(rawPath, 0666)
-	conn.SetReadBuffer(256 * 1024)
-	fmt.Fprintln(os.Stderr, "[raw] waiting for raw mic packets on", rawPath)
 	var rp rawProc
 	buf := make([]byte, 2048)
 	const batch = 4 // ~41 ms per network write: 4x fewer syscalls
 	pcm := make([]byte, 0, batch*2*(chSamples+8))
-	pending := 0
 	for {
-		n, _, err := conn.ReadFromUnix(buf)
+		os.Remove(rawPath)
+		conn, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: rawPath, Net: "unixgram"})
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "[raw] read error:", err)
-			time.Sleep(time.Second)
+			fmt.Fprintln(os.Stderr, "[raw] listen error:", err)
+			time.Sleep(2 * time.Second)
 			continue
 		}
-		if n != micPktLen || buf[0] != micTag {
-			continue
+		os.Chmod(rawPath, 0666)
+		conn.SetReadBuffer(256 * 1024)
+		ours, _ := os.Stat(rawPath)
+		fmt.Fprintln(os.Stderr, "[raw] waiting for raw mic packets on", rawPath)
+		pending := 0
+		quietSince := time.Now()
+		for {
+			conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			n, _, err := conn.ReadFromUnix(buf)
+			if err != nil {
+				if ne, ok := err.(net.Error); ok && ne.Timeout() {
+					now, _ := os.Stat(rawPath)
+					if now == nil || ours == nil || !os.SameFile(now, ours) {
+						fmt.Fprintln(os.Stderr, "[raw] socket file gone or replaced - making a fresh one")
+						break
+					}
+					if time.Since(quietSince) > 20*time.Second && rawCount.Load() > 0 {
+						fmt.Fprintln(os.Stderr, "[raw] no packets for 20 s - making a fresh socket")
+						break
+					}
+					continue
+				}
+				fmt.Fprintln(os.Stderr, "[raw] read error:", err)
+				break
+			}
+			if n != micPktLen || buf[0] != micTag {
+				continue
+			}
+			quietSince = time.Now()
+			if rawCount.Add(1) == 1 {
+				fmt.Fprintln(os.Stderr, "[raw] raw mic stream flowing - constant listening")
+			}
+			lastRaw.Store(time.Now().UnixNano())
+			noteRawPacket(buf[:n])
+			pcm = rp.process(buf[:n], pcm)
+			if pending++; pending >= batch {
+				writeClient(pcm)
+				pcm, pending = pcm[:0], 0
+			}
 		}
-		if rawCount.Add(1) == 1 {
-			fmt.Fprintln(os.Stderr, "[raw] raw mic stream flowing - constant listening")
-		}
-		lastRaw.Store(time.Now().UnixNano())
-		noteRawPacket(buf[:n])
-		pcm = rp.process(buf[:n], pcm)
-		if pending++; pending >= batch {
-			writeClient(pcm)
-			pcm, pending = pcm[:0], 0
-		}
+		conn.Close()
+		time.Sleep(500 * time.Millisecond)
 	}
 }
 

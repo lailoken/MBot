@@ -121,8 +121,11 @@ bool Ears::start(std::function<void(const Heard&)> on_heard, std::string* err) {
     auto cp = whisper_context_default_params();  // use_gpu is on: GPU if this build has one
     cp.use_gpu = std::getenv("MBOT_WHISPER_CPU") == nullptr;
     wctx_ = whisper_init_from_file_with_params(model_path_.c_str(), cp);
-    if (!wctx_ && cp.use_gpu) {  // no usable GPU (or out of memory): the CPU it is
-        std::fprintf(stderr, "[ears] speech-to-text couldn't start on the GPU - using the CPU\n");
+    gpu_wanted_ = cp.use_gpu;
+    on_gpu_ = wctx_ != nullptr && cp.use_gpu;
+    last_gpu_try_ = std::chrono::steady_clock::now();
+    if (!wctx_ && cp.use_gpu) {  // no usable GPU (or out of memory): the CPU for now, retried every 10 min
+        std::fprintf(stderr, "[ears] speech-to-text couldn't start on the GPU (busy or out of memory?) - using the CPU, will retry\n");
         cp.use_gpu = false;
         wctx_ = whisper_init_from_file_with_params(model_path_.c_str(), cp);
     }
@@ -323,9 +326,12 @@ void Ears::tapLoop() {
         std::vector<int16_t> frame;
         frame.reserve(160);
         size_t frames = 0;
+        int64_t last_rx = nowMs();
         while (running_) {
             ssize_t r = recv(fd, raw + carry, sizeof raw - carry, 0);
             if (r > 0) {
+                last_rx = nowMs();
+                silent_since_ms_ = 0;
                 size_t total = carry + size_t(r), n = total / 2;
                 for (size_t i = 0; i < n; ++i) {
                     int16_t v;
@@ -342,6 +348,15 @@ void Ears::tapLoop() {
             } else if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                 // Stream paused (wake-word fallback): close out any utterance in progress.
                 for (int k = 0; k < 125 && in_speech_; ++k) onFrame(kZeros, 160, 16000);
+                // Self-repair: connected but not a byte for 15 s -> reconnect; silent for a minute -> the
+                // robot side is stuck: tell the brain (it restarts the streamer on the robot).
+                int64_t t = nowMs();
+                if (t - last_rx > 15000) {
+                    if (!silent_since_ms_) silent_since_ms_ = last_rx;
+                    log("no audio from the robot for 15 s - reconnecting");
+                    if (t - silent_since_ms_ > 60000 && on_stall_) { on_stall_(); silent_since_ms_ = t; }
+                    break;
+                }
             } else {
                 break;  // connection closed
             }
@@ -454,8 +469,43 @@ std::string Ears::transcribe(const std::vector<float>& pcm, float* no_speech) {
     return b == std::string::npos ? "" : text.substr(b, e - b + 1);
 }
 
+// One throwaway transcription so the GPU compiles its shaders now. Low noise, not silence: silence skips
+// the decoder, whose shaders would then compile on someone's first sentence.
+void Ears::warmUp() {
+    auto t0 = std::chrono::steady_clock::now();
+    uint32_t r = 12345;
+    for (int secs : {2, 5}) {  // two lengths: the GPU compiles per shape
+        std::vector<float> x(size_t(16000 * secs));
+        for (auto& v : x) { r = r * 1103515245u + 12345u; v = float(int((r >> 16) & 0x7ff) - 1024); }
+        transcribe(x);
+    }
+    double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    log("speech-to-text warmed up on the GPU (" + std::to_string(int(ms)) + " ms)");
+}
+
+void Ears::maybeMoveToGpu() {
+    if (!gpu_wanted_ || on_gpu_) return;
+    auto now = std::chrono::steady_clock::now();
+    if (now - last_gpu_try_ < std::chrono::minutes(10)) return;
+    last_gpu_try_ = now;
+    auto cp = whisper_context_default_params();
+    cp.use_gpu = true;
+    whisper_context* g = whisper_init_from_file_with_params(model_path_.c_str(), cp);
+    if (!g) return;
+    whisper_free(wctx_);
+    wctx_ = g;
+    on_gpu_ = true;
+    warmUp();
+    std::fprintf(stderr, "[ears] speech-to-text moved to the GPU\n");
+    log("speech-to-text moved to the GPU");
+}
+
 void Ears::sttLoop() {
+    if (on_gpu_) {  // the first GPU run compiles shaders (~3 s): do it now, not on someone's first sentence
+        warmUp();
+    }
     while (running_) {
+        maybeMoveToGpu();
         Pending item;
         {
             std::unique_lock<std::mutex> lk(qmu_);

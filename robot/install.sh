@@ -54,8 +54,11 @@ r 'mkdir -p /data/mbot'
 if upload "$HERE/out/libmbotmic.so" /data/mbot/libmbotmic.so.candidate; then :; fi
 upload "$HERE/out/shimtest" /data/mbot/shimtest >/dev/null || true
 if ! r 'cd /data/mbot && LD_PRELOAD=./libmbotmic.so.candidate /bin/true && LD_PRELOAD=./libmbotmic.so.candidate ./shimtest | grep -q fwd_ok=1'; then
-  echo "   the shim failed its self-test on the robot - not installing it"; exit 1
+  echo "   the shim failed its self-test on the robot - not installing it"; r 'systemctl restart mictap 2>/dev/null || true'; exit 1
 fi
+# The self-test borrows mictap's raw-mic socket (and removes it afterwards): give mictap a fresh one.
+r 'systemctl restart mictap 2>/dev/null || true'
+
 if [ "$(r 'md5sum /data/mbot/libmbotmic.so.candidate | cut -d" " -f1')" != "$(r 'md5sum /data/mbot/libmbotmic.so 2>/dev/null | cut -d" " -f1')" ]; then
   r 'cd /data/mbot; [ -f libmbotmic.so ] && cp -f libmbotmic.so libmbotmic.so.prev; cp -f libmbotmic.so.candidate libmbotmic.so'
   echo "   shim updated (loads at the next reboot)"; need_reboot=1
