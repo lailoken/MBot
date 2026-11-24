@@ -1,0 +1,12 @@
+# systemd *user* service: the live mind page at http://localhost:8700 (localhost only).
+# Install like mbot-brain.service; edit <serial>.
+[Unit]
+Description=MBot mind monitor - live web view of Vector's mind (localhost only)
+
+[Service]
+ExecStart=/usr/bin/python3 %h/dev/MBot/tools/mindview.py --data %h/.local/share/mbot/<serial> --port 8700
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

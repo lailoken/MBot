@@ -1,0 +1,12 @@
+build/
+third_party/
+models/
+compile_commands.json
+*.jpg
+*.wav
+robot/out/
+__pycache__/
+*.pyc
+.cache/
+*.bak*
+*.tmp

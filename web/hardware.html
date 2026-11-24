@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vector · Body &amp; hardware</title>
+<style>
+  :root{--bg:#0e1116;--panel:#161b22;--panel2:#1c232d;--line:#273040;--ink:#e6edf3;--dim:#8b97a7;--faint:#5b6775;
+    --accent:#4dd0c0;--warm:#ffb454;--rose:#ff6b8a;--good:#5fd38d;--cool:#6aa6ff;--violet:#b48cff}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased;padding:20px;max-width:2600px;margin:0 auto}
+  a{color:var(--accent);text-decoration:none} a:hover{text-decoration:underline}
+  h1{font-size:20px;margin:0}
+  h2{font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:var(--faint);margin:0 0 12px;font-weight:600}
+  .top{display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;margin-bottom:16px}
+  .sub{color:var(--dim);font-size:12px}
+  .grid{display:grid;gap:16px}
+  .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+  .tile{background:var(--panel2);border-radius:12px;padding:10px 12px}
+  .tile .k{font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:.08em}
+  .tile .v{font-size:22px;font-weight:650;font-variant-numeric:tabular-nums}
+  .tile .s{font-size:11.5px;color:var(--dim)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  td{padding:5px 0;border-top:1px solid var(--line);vertical-align:top}
+  tr:first-child td{border-top:none}
+  td.k{color:var(--dim);width:42%;padding-right:10px}
+  td.v{font-variant-numeric:tabular-nums;word-break:break-word}
+  .procs th{text-align:left;color:var(--faint);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.06em;padding:4px 8px 6px 0}
+  .procs td{padding:3px 8px 3px 0;font-variant-numeric:tabular-nums;border-top:1px solid var(--line)}
+  .procs td.n{text-align:right;white-space:nowrap} .procs th.n{text-align:right}
+  .pbar{display:inline-block;height:7px;border-radius:4px;vertical-align:middle;margin-right:8px}
+  .procs .cmd{color:var(--ink)} .procs .dim{color:var(--faint)}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+  .chip{font-size:12px;color:var(--dim);background:var(--panel2);border:1px solid var(--line);border-radius:999px;
+    padding:2px 10px;cursor:pointer;user-select:none}
+  .chip.on{color:#0e1116;background:var(--accent);border-color:var(--accent)}
+  .legend{display:flex;gap:12px;flex-wrap:wrap;font-size:12px;color:var(--dim);margin-top:8px}
+  .legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+  svg text{fill:var(--faint);font-size:10.5px;font-family:inherit}
+  .grid-l{stroke:#222a36;stroke-width:1}
+  .ok{color:var(--good)} .bad{color:var(--rose)} .warn{color:var(--warm)}
+  .tip{position:fixed;pointer-events:none;background:#0b0f14;border:1px solid var(--line);border-radius:8px;padding:5px 8px;
+    font-size:12px;display:none;z-index:5}
+  .empty{color:var(--faint);padding:20px;text-align:center}
+</style>
+</head>
+<body>
+<div class="top">
+  <a href="/">← his mind</a>
+  <h1>Body &amp; hardware</h1>
+  <span class="sub" id="upd"></span>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>Battery now</h2>
+    <div class="tiles" id="tiles"></div>
+  </div>
+
+  <div class="card">
+    <h2 style="display:flex;justify-content:space-between;align-items:center">Battery history · coloured by what he was doing
+      <span class="chips" id="range"></span></h2>
+    <svg id="hist" width="100%" height="240" style="display:block"></svg>
+    <div class="legend" id="legend"></div>
+  </div>
+
+  <div class="card">
+    <h2 style="display:flex;justify-content:space-between;align-items:baseline">Processes · what's using his CPU and memory
+      <span class="sub" id="procsum"></span></h2>
+    <table id="procs" class="procs"></table>
+    <div class="sub" id="procnote" style="margin-top:8px"></div>
+  </div>
+
+  <div class="cols">
+    <div class="card">
+      <h2>Discharge curve · voltage → percent</h2>
+      <svg id="curve" width="100%" height="220" style="display:block"></svg>
+      <div class="sub" id="curvenote"></div>
+    </div>
+    <div class="card">
+      <h2>Battery health</h2>
+      <table id="health"></table>
+      <h2 style="margin-top:16px">Full charge by day · highest resting voltage on the charger</h2>
+      <svg id="fullday" width="100%" height="90" style="display:block"></svg>
+    </div>
+  </div>
+
+  <div class="cols">
+    <div class="card"><h2>Robot</h2><table id="robot"></table></div>
+    <div class="card"><h2>Mind · models</h2><table id="brain"></table>
+      <h2 style="margin-top:16px">Libraries</h2><table id="libs"></table></div>
+  </div>
+</div>
+<div class="tip" id="tip"></div>
+
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const ACT={charging:['#5fd38d','charging'],'on charger':['#3f8f6a','on charger (full)'],active:['#ff6b8a','moving / active'],
+  idle:['#ffb454','idle off charger'],dozing:['#6aa6ff','dozing'],'heading home':['#b48cff','heading home'],
+  calibrating:['#e6edf3','calibration run']};
+let hw=null, log=[], range=24;
+const ago=t=>{const s=Date.now()/1000-t;return s<90?'just now':s<3600?Math.round(s/60)+' min ago':s<86400?Math.round(s/3600)+' h ago':Math.round(s/86400)+' days ago';};
+const fmtT=t=>new Date(t*1000).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+const rows=(el,list)=>{$(el).innerHTML=list.filter(r=>r&&r[1]!=null&&r[1]!=='').map(([k,v,cls])=>`<tr><td class="k">${esc(k)}</td><td class="v ${cls||''}">${v}</td></tr>`).join('')||'<tr><td class="empty">—</td></tr>';};
+
+function tiles(){
+  const b=hw.battery||{};
+  const t=[];
+  t.push(['Charge',b.pct!=null?b.pct+'%':'—',b.volts!=null?(+b.volts).toFixed(2)+' V'+(b.charging?' · charging (reads high)':b.on_charger?' · on charger':''):'offline']);
+  t.push(['Voltage source',b.live?'live':'held',b.live?'head power chip (the body board doesn\'t measure off the charger)':b.on_charger?'body board, measured on the charger':'body board (held)']);
+  if(b.temp_c!=null&&b.temp_c>=0) t.push(['Battery temp',Math.round(b.temp_c)+' °C',b.temp_c>=50?'hot - charging pauses to cool':b.temp_c>=45?'warm':'fine']);
+  t.push(['Heads home at',b.home_pct+'%',(+b.home_volts).toFixed(2)+' V'+(b.calibrated?' · ≥2 min reserve':'')]);
+  t.push(['Full charge',b.full_volts?(+b.full_volts).toFixed(2)+' V':'—','what the charger tops him up to = 100%']);
+  t.push(['Full → flat',b.calibrated?Math.round(b.runtime_min)+' min':'?',b.calibrated?'measured':'not calibrated yet: /battery calibrate']);
+  t.push(['Safe-mode',b.safe_mode?'ON':'off',b.safe_mode?'no motion, stays on charger':(b.calibrating?'calibration run in progress':'normal')]);
+  t.push(['Brownouts',String(b.brownouts_24h||0),'in the last 24 h (this session)']);
+  $('tiles').innerHTML=t.map(([k,v,s])=>`<div class="tile"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div><div class="s">${esc(s)}</div></div>`).join('');
+}
+
+function svgSize(el){return [el.clientWidth||el.getBoundingClientRect().width||800, +el.getAttribute('height')];}
+
+function history(){
+  const el=$('hist'), [W,H]=svgSize(el), L=34,R=8,T=8,B=22, now=Date.now()/1000, t0=now-range*3600;
+  const pts=log.filter(p=>p.t>=t0);
+  const x=t=>L+(t-t0)/(now-t0)*(W-L-R), y=p=>T+(100-p)/100*(H-T-B);
+  let s='';
+  for(const p of [0,20,50,80,100]) s+=`<line class="grid-l" x1="${L}" x2="${W-R}" y1="${y(p)}" y2="${y(p)}"/><text x="${L-6}" y="${y(p)+3.5}" text-anchor="end">${p}%</text>`;
+  const ticks=6; for(let i=0;i<=ticks;i++){const t=t0+(now-t0)*i/ticks;
+    s+=`<text x="${x(t)}" y="${H-6}" text-anchor="${i==0?'start':i==ticks?'end':'middle'}">${range<=24?new Date(t*1000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):new Date(t*1000).toLocaleDateString([],{month:'short',day:'numeric'})}</text>`;}
+  if(hw&&hw.battery) s+=`<line x1="${L}" x2="${W-R}" y1="${y(hw.battery.home_pct)}" y2="${y(hw.battery.home_pct)}" stroke="#b48cff" stroke-dasharray="4 4" opacity=".6"/><text x="${W-R}" y="${y(hw.battery.home_pct)-4}" text-anchor="end" style="fill:#b48cff">heads home</text>`;
+  // segments: colour by the activity at the start; a gap > 5 min = he was offline (no line)
+  for(let i=1;i<pts.length;i++){const a=pts[i-1],b=pts[i];
+    if(b.t-a.t>300){s+=`<rect x="${x(a.t)}" y="${T}" width="${Math.max(1,x(b.t)-x(a.t))}" height="${H-T-B}" fill="#ffffff" opacity=".03"/>`;continue;}
+    const c=(ACT[a.act]||['#8b97a7'])[0];
+    s+=`<line x1="${x(a.t).toFixed(1)}" y1="${y(a.pct).toFixed(1)}" x2="${x(b.t).toFixed(1)}" y2="${y(b.pct).toFixed(1)}" stroke="${c}" stroke-width="2.4" stroke-linecap="round"/>`;}
+  if(!pts.length) s+=`<text x="${W/2}" y="${H/2}" text-anchor="middle">no readings in this range yet - he logs one a minute</text>`;
+  el.innerHTML=s;
+  el.onmousemove=e=>{if(!pts.length)return;const r=el.getBoundingClientRect(),t=t0+(e.clientX-r.left-L)/(W-L-R)*(now-t0);
+    let best=pts[0];for(const p of pts) if(Math.abs(p.t-t)<Math.abs(best.t-t)) best=p;
+    const tip=$('tip');tip.style.display='block';tip.style.left=(e.clientX+12)+'px';tip.style.top=(e.clientY+12)+'px';
+    tip.innerHTML=`${fmtT(best.t)}<br><b>${best.pct}%</b> · ${(+best.v).toFixed(2)} V<br>${esc((ACT[best.act]||[0,best.act])[1])}${best.level==1?' · firmware LOW':''}`;};
+  el.onmouseleave=()=>$('tip').style.display='none';
+  const used=new Set(pts.map(p=>p.act));
+  $('legend').innerHTML=Object.entries(ACT).filter(([k])=>used.has(k)||!pts.length).map(([k,[c,l]])=>`<span><i style="background:${c}"></i>${esc(l)}</span>`).join('')+
+    '<span><i style="background:#ffffff;opacity:.15"></i>offline / no data</span>';
+}
+
+function curve(){
+  const b=hw.battery||{}, c=b.curve||[]; const el=$('curve'), [W,H]=svgSize(el), L=40,R=10,T=8,B=24;
+  if(c.length<2){el.innerHTML='';return;}
+  const vmin=Math.min(...c.map(p=>p[0]))-0.03, vmax=Math.max(...c.map(p=>p[0]),b.full_volts||0)+0.03;
+  const x=v=>L+(v-vmin)/(vmax-vmin)*(W-L-R), y=p=>T+(100-p)/100*(H-T-B);
+  // what the page shows as percent = raw curve stretched so that full_volts = 100
+  const raw=v=>{if(v<=c[0][0])return 0;for(let i=1;i<c.length;i++) if(v<c[i][0]) return c[i-1][1]+(v-c[i-1][0])/(c[i][0]-c[i-1][0])*(c[i][1]-c[i-1][1]);return 100;};
+  const full=b.full_volts?raw(b.full_volts):100, pct=v=>Math.min(100,raw(v)*100/(full>1?full:100));
+  let s='';
+  for(const p of [0,25,50,75,100]) s+=`<line class="grid-l" x1="${L}" x2="${W-R}" y1="${y(p)}" y2="${y(p)}"/><text x="${L-6}" y="${y(p)+3.5}" text-anchor="end">${p}%</text>`;
+  for(let v=Math.ceil(vmin*10)/10;v<=vmax;v+=0.1) s+=`<text x="${x(v)}" y="${H-6}" text-anchor="middle">${v.toFixed(1)} V</text>`;
+  let d='';for(let i=0;i<=80;i++){const v=vmin+(vmax-vmin)*i/80;d+=(i?'L':'M')+x(v).toFixed(1)+' '+y(pct(v)).toFixed(1);}
+  s+=`<path d="${d}" fill="none" stroke="var(--accent)" stroke-width="2.4"/>`;
+  for(const p of c) s+=`<circle cx="${x(p[0])}" cy="${y(pct(p[0]))}" r="2.6" fill="var(--accent)"/>`;
+  if(b.home_volts) s+=`<line x1="${x(b.home_volts)}" x2="${x(b.home_volts)}" y1="${T}" y2="${H-B}" stroke="#b48cff" stroke-dasharray="4 4"/><text x="${x(b.home_volts)+4}" y="${T+10}" style="fill:#b48cff">home</text>`;
+  if(b.volts!=null&&!b.charging) s+=`<circle cx="${x(b.volts)}" cy="${y(pct(b.volts))}" r="5" fill="none" stroke="var(--warm)" stroke-width="2"/><text x="${x(b.volts)-6}" y="${y(pct(b.volts))-8}" text-anchor="end" style="fill:var(--warm)">now</text>`;
+  el.innerHTML=s;
+  $('curvenote').textContent=b.calibrated?'Measured on a calibration run: 100% = where the run started, 0% = where he died.':
+    'Generic Li-ion curve, stretched so the charger\'s top voltage reads 100%. A calibration run (/battery calibrate) replaces it with his real curve.';
+}
+
+function health(){
+  const b=hw.battery||{}, runs=b.runs||[];
+  const first=runs[0], last=runs[runs.length-1];
+  rows('health',[
+    ['last run, full → flat', last?Math.round(last.runtime_min)+' min ('+esc(last.date)+')':'no calibration run yet'],
+    ['compared with the first run', runs.length>1&&first.runtime_min?Math.round(100*last.runtime_min/first.runtime_min)+'% of '+Math.round(first.runtime_min)+' min ('+esc(first.date)+')':null,
+      runs.length>1&&last.runtime_min/first.runtime_min<0.7?'bad':''],
+    ['died at', last?(+last.died_at_volts).toFixed(2)+' V':null],
+    ['started at', last?(+last.start_volts).toFixed(2)+' V':null],
+    ['calibration runs', runs.length?String(runs.length):null],
+    ['safe-mode', b.safe_mode?'ON (after a brownout: no motion, stays on charger)':'off', b.safe_mode?'warn':'ok'],
+  ]);
+  const days=Object.entries(b.full_by_day||{}).sort().slice(-30), el=$('fullday'), [W,H]=svgSize(el);
+  if(!days.length){el.innerHTML='<text x="4" y="40">collecting - one reading a day while he rests on the charger</text>';return;}
+  const vs=days.map(d=>d[1].v), lo=Math.min(...vs)-0.03, hi=Math.max(...vs)+0.01, bw=(W-30)/Math.max(days.length,7);
+  el.innerHTML=days.map(([d,o],i)=>{const h=(o.v-lo)/(hi-lo)*(H-22);return `<rect x="${i*bw}" y="${H-16-h}" width="${bw-3}" height="${h}" rx="2" fill="var(--accent)" opacity=".7"><title>${d}: ${o.v} V</title></rect>`;}).join('')+
+    `<text x="0" y="${H-3}">${days[0][0]}</text><text x="${W-30}" y="12" text-anchor="end">${hi.toFixed(2)} V</text>`;
+}
+
+function tables(){
+  const r=hw.robot||{}, br=hw.brain||{};
+  const [memT,memA]=(r.mem||'').split(' '), [dT,dF]=(r.disk||'').split(' ');
+  const temp=r.temp?Math.round(r.temp/1000):null;
+  rows('robot',[
+    ['status', r.online?'online':'offline', r.online?'ok':'bad'],
+    ['serial', esc(r.serial)], ['address', esc(r.address)],
+    ['firmware', esc([r.os&&('WireOS '+r.os), r.anki&&('(Anki base '+r.anki+')')].filter(Boolean).join(' ')||r.firmware_reported)],
+    ['unlocked', r.os?'yes - dev/OSKR-style build, SSH enabled':null, 'ok'],
+    ['build revision', esc(r.rev)],
+    ['kernel', esc(r.kernel&&(r.kernel+' · '+(r.arch||'')))],
+    ['processor', esc(r.soc&&(r.soc+(r.cores?' · '+r.cores+' cores':'')))],
+    ['CPU temperature', temp!=null?temp+' °C':null, temp>70?'bad':temp>60?'warn':''],
+    ['memory', memT?`${memT} MB (${memA} MB available)`:null],
+    ['storage (/data)', dT?`${dT} MB (${dF} MB free)`:null],
+    ['up since', esc(r.boot)], ['load', esc(r.load)],
+    ['Wi-Fi signal', r.wifi?r.wifi+' dBm':null, r.wifi<-75?'warn':''],
+    ['mic tap (shim + mictap)', r.shim?(r.shim==='yes'?'installed':'not installed')+' · mictap '+esc(r.mictap):null, r.shim==='yes'&&r.mictap==='running'?'ok':'warn'],
+    ['firmware hears the mics', r.silence?(r.silence==='yes'?'no (silenced - only his brain listens)':'yes'):null],
+    ['robot details checked', r.checked?ago(r.checked):null],
+  ]);
+  rows('brain',[['conversation',esc(br.conversation)],['background thoughts',esc(br.background)],['dreaming / consolidation',esc(br.consolidation)],
+    ['vision',esc(br.vision)],['speech to text',esc(br.speech_to_text)],['voice recognition',esc(br.voice_recognition)],['ears',esc(br.ears)],['brain built',esc(br.built)]]);
+  rows('libs',(hw.libraries||[]).map(l=>[l.name,`${esc(l.version)} · <span class="sub">${esc(l.licence)}</span>`]));
+}
+
+const PROC_NOTE={'vic-engine':'behaviours, camera vision (faces, markers), planning','vic-anim':'face display, animations, sound, (firmware) mic',
+  'vic-robot':'talks to the body board: motors, sensors, raw mic','vic-cloud':'Wire-Pod / cloud link','vic-gateway':'the SDK the brain talks to',
+  'mictap':'streams the raw mic to the brain','top':'(the measurement itself)','vic-switchboard':'Bluetooth / pairing','mm-anki-camera':'camera driver',
+  'vic-dasmgr':'firmware telemetry','vic-bootAnim':'boot animation'};
+function procs(){
+  const sy=hw.system||{}, ps=sy.procs||[];
+  if(!ps.length){$('procs').innerHTML='<tr><td class="empty">no process list yet - it is read from the robot every minute</td></tr>';return;}
+  const tot=sy.mem_total_kb||0, av=sy.mem_avail_kb||0, maxc=Math.max(25,...ps.map(p=>p.cpu));
+  $('procsum').textContent=`CPU ${sy.cpu_busy!=null?Math.round(sy.cpu_busy)+'% busy (all 4 cores)':'?'} · RAM ${tot?Math.round((tot-av)/1024)+' of '+Math.round(tot/1024)+' MB used':'?'} · ${ago(sy.at)}`;
+  $('procs').innerHTML='<tr><th>process</th><th>what it does</th><th class="n">CPU (of 1 core)</th><th class="n">RAM</th><th class="n">pid</th></tr>'+
+    ps.map(p=>`<tr><td class="cmd">${esc(p.cmd)}</td><td class="dim">${esc(PROC_NOTE[p.cmd]||'')}</td>
+      <td class="n"><span class="pbar" style="width:${Math.round(70*p.cpu/maxc)}px;background:${p.cpu>=20?'var(--rose)':p.cpu>=5?'var(--warm)':'var(--accent)'}"></span>${p.cpu.toFixed(1)}%</td>
+      <td class="n">${p.res_kb>=1024?(p.res_kb/1024).toFixed(1)+' MB':p.res_kb+' KB'} <span class="dim">(${p.mem.toFixed(1)}%)</span></td>
+      <td class="n dim">${p.pid}</td></tr>`).join('');
+  const pt=(hw.robot||{}).power_tweaks;
+  $('procnote').textContent=pt==='on'?'Power savers on: the firmware\'s own mic processing and "Hey Vector" detector are idle (the brain has its own ears), and camera vision runs at ~5 fps.':
+    pt==='off'?'Power savers off (/data/mbot/no_power_tweaks on the robot).':'';
+}
+function render(){if(!hw)return; $('upd').textContent='updated '+ago(hw.updated); tiles(); history(); procs(); curve(); health(); tables();}
+async function loadHw(){hw=await fetch('hardware.json?t='+Date.now(),{cache:'no-store'}).then(r=>r.json()).catch(()=>hw); render();}
+async function loadLog(){const t=await fetch('battery_log.jsonl?t='+Date.now(),{cache:'no-store'}).then(r=>r.ok?r.text():'').catch(()=>'');
+  log=t.split('\n').filter(l=>l.trim()).map(l=>{try{return JSON.parse(l)}catch{return null}}).filter(Boolean); if(hw) history();}
+for(const [h,l] of [[2,'2 h'],[6,'6 h'],[24,'24 h'],[72,'3 days'],[168,'week'],[720,'30 days']]){
+  const c=document.createElement('span');c.className='chip'+(h===range?' on':'');c.textContent=l;
+  c.onclick=()=>{range=h;for(const x of $('range').children)x.classList.toggle('on',x===c);history();};$('range').appendChild(c);}
+window.addEventListener('resize',render);
+const es=new EventSource('/events');
+es.addEventListener('files',m=>{const f=JSON.parse(m.data); if('hardware.json' in f) loadHw(); if('battery_log.jsonl' in f) loadLog();});
+loadHw().then(loadLog);
+setInterval(()=>{if(hw)$('upd').textContent='updated '+ago(hw.updated);},30000);
+</script>
+</body>
+</html>

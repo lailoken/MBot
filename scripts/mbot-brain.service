@@ -1,0 +1,21 @@
+# systemd *user* service: keeps the robot's mind running.
+# Install:  mkdir -p ~/.config/systemd/user && cp scripts/mbot-brain.service ~/.config/systemd/user/
+#           (edit <serial> below), then: systemctl --user daemon-reload && systemctl --user enable --now mbot-brain
+# Logs:     <data dir>/brain_service.log
+# Claude:   put ANTHROPIC_API_KEY=... (no "export") in ~/.config/mbot/env.systemd (chmod 600)
+[Unit]
+Description=MBot - AI mind for Vector
+After=network-online.target ollama.service
+
+[Service]
+WorkingDirectory=%h/dev/MBot
+EnvironmentFile=-%h/.config/mbot/env.systemd
+ExecStart=%h/dev/MBot/build/mbot brain --mic tap --debug-ears --whisper %h/dev/MBot/models/ggml-small.en.bin --input-fifo %h/.local/share/mbot/<serial>/talk.fifo
+Restart=always
+RestartSec=8
+StandardInput=null
+StandardOutput=append:%h/.local/share/mbot/<serial>/brain_service.log
+StandardError=append:%h/.local/share/mbot/<serial>/brain_service.log
+
+[Install]
+WantedBy=default.target
