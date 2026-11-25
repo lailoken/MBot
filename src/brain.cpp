@@ -376,6 +376,8 @@ public:
         for (auto& p : mind_.knownPeople()) std::printf("%s ", p.c_str());
         std::printf("\n[brain] feeling %s\n", mind_.mood().describe().c_str());
 
+        loadToday();
+        backfillToday();
         // Fetch what's missing, the first time it's needed: local models (background), the speech model (now).
         {
             // His eyes may live on another machine (--vision-url); the text models live where the local mind is.
@@ -1312,6 +1314,121 @@ private:
         if (recap.rfind("Talked with", 0) != 0) return;
         mind_.remember(recap, 3, {who}, "episode");
         std::printf("[memory+] %s\n", recap.c_str());
+        addTodayNote(recap);
+    }
+
+    // ---- Today's thread: one-line summaries of today's conversations, in every prompt until midnight, so a
+    // topic from this morning (or 15 lines ago) isn't simply gone. Memorable things become memories anyway.
+    std::string todayFile() const { return mind_dir_ + "/today.json"; }
+    static std::string dayStamp() {
+        std::time_t t = std::time(nullptr);
+        char b[16];
+        std::strftime(b, sizeof b, "%Y-%m-%d", std::localtime(&t));
+        return b;
+    }
+    void loadToday() {
+        try {
+            auto t = readFile(todayFile());
+            if (t.empty()) return;
+            json j = json::parse(t);
+            if (j.value("date", "") != dayStamp()) return;
+            std::lock_guard<std::mutex> lk(today_mu_);
+            for (auto& n : j.value("notes", json::array())) today_notes_.push_back(n.get<std::string>());
+        } catch (...) {
+        }
+    }
+    // First start of the day without notes (or an update from before notes existed): summarise today's journal
+    // in chunks, in the background, with the free local model.
+    void backfillToday() {
+        { std::lock_guard<std::mutex> lk(today_mu_); if (!today_notes_.empty()) return; }
+        std::vector<std::pair<std::string, std::string>> lines;  // hh:mm, "who: text"
+        std::ifstream f(mind_dir_ + "/journal.log");
+        std::string l, day = dayStamp();
+        while (std::getline(f, l))
+            if (l.size() > 21 && l.compare(0, 10, day) == 0) lines.push_back({l.substr(11, 5), l.substr(21)});
+        if (lines.size() < 6) return;
+        std::thread([this, lines] {
+            try {
+                LlmBackend* m = noteMind();
+                size_t chunk = std::max<size_t>(30, lines.size() / 8 + 1);
+                for (size_t i = 0; i < lines.size(); i += chunk) {
+                    std::string text, when = lines[i].first;
+                    for (size_t k = i; k < std::min(lines.size(), i + chunk); ++k) text += lines[k].second + "\n";
+                    json schema = {{"type", "object"}, {"additionalProperties", false}, {"required", {"note"}},
+                                   {"properties", {{"note", {{"type", "string"}}}}}};
+                    json out;
+                    std::string err;
+                    setCallReason("today's thread (catch-up)");
+                    if (!m->complete("You keep a small robot's notes of the day. Be brief and concrete.",
+                                     {{"user", "Conversation from " + when + " (" + mind_.name() + " is the robot):\n" + text +
+                                       "\nIn ONE short line (max ~25 words), note the topics and any open threads. Start with "
+                                       "\"talked with\" or \"talked about\".", ""}}, schema, out, &err))
+                        continue;
+                    std::string note = out.value("note", "");
+                    if (note.empty()) continue;
+                    std::lock_guard<std::mutex> lk(today_mu_);
+                    today_notes_.push_back(when + " " + note);
+                    try { std::ofstream(todayFile()) << json{{"date", today_date_}, {"notes", today_notes_}}.dump(1) << "\n"; } catch (...) {}
+                    std::printf("[today] (catch-up) %s %s\n", when.c_str(), note.c_str());
+                }
+            } catch (...) {
+            }
+        }).detach();
+    }
+    // Notes need accuracy (names, titles): Haiku when available (a fraction of a cent), else the local model.
+    LlmBackend* noteMind() {
+        std::lock_guard<std::mutex> lk(note_mind_mu_);
+        if (claude_ok_ && !overBudget()) {
+            if (!note_mind_) note_mind_ = makeClaudeBackend("claude-haiku-5-5", "low");
+            return note_mind_.get();
+        }
+        return fast_ ? fast_.get() : llm_.get();
+    }
+    void addTodayNote(const std::string& text) {
+        std::time_t t = std::time(nullptr);
+        char hm[8];
+        std::strftime(hm, sizeof hm, "%H:%M", std::localtime(&t));
+        std::lock_guard<std::mutex> lk(today_mu_);
+        if (today_date_ != dayStamp()) { today_date_ = dayStamp(); today_notes_.clear(); }
+        today_notes_.push_back(std::string(hm) + " " + text);
+        if (today_notes_.size() > 40) today_notes_.erase(today_notes_.begin());
+        try { std::ofstream(todayFile()) << json{{"date", today_date_}, {"notes", today_notes_}}.dump(1) << "\n"; } catch (...) {}
+    }
+    std::string todayContext() {
+        std::lock_guard<std::mutex> lk(today_mu_);
+        if (today_date_ != dayStamp() || today_notes_.empty()) return "";
+        std::string out = "Earlier today (summaries of your conversations so far):\n";
+        for (auto& n : today_notes_) out += "  " + n + "\n";
+        return out;
+    }
+    // Every line of conversation; every 12 lines the last stretch is summarised into today's thread.
+    void logLine(const std::string& who, const std::string& text) {
+        mind_.logDialogue(who, text);
+        if (++lines_since_note_ < 12 || summarising_.exchange(true)) return;
+        lines_since_note_ = 0;
+        std::string lines;
+        for (auto& [w, t] : mind_.recentDialogue(12)) lines += w + ": " + t + "\n";
+        std::thread([this, lines] {
+            try {
+                LlmBackend* m = noteMind();
+                json schema = {{"type", "object"}, {"additionalProperties", false}, {"required", {"note"}},
+                               {"properties", {{"note", {{"type", "string"}}}}}};
+                json out;
+                std::string err;
+                setCallReason("today's thread note");
+                if (m->complete("You keep a small robot's notes of the day. Be brief and concrete.",
+                                {{"user", "Conversation stretch (" + mind_.name() + " is the robot):\n" + lines +
+                                  "\nIn ONE short line (max ~25 words), note the topics and any open threads (questions not "
+                                  "answered, things " + mind_.name() + " offered or promised to do). Start with \"talked with\" "
+                                  "or \"talked about\".", ""}},
+                                schema, out, &err)) {
+                    std::string note = out.value("note", "");
+                    if (!note.empty()) { addTodayNote(note); std::printf("[today] %s\n", note.c_str()); }
+                }
+            } catch (...) {
+            }
+            summarising_ = false;
+        }).detach();
     }
     static float wrap180(float d) {
         while (d > 180) d -= 360;
@@ -2392,6 +2509,7 @@ private:
                 out += "- (" + when + ") " + mem.text + "\n";
             }
         }
+        out += todayContext();
         auto dialogue = mind_.recentDialogue(24);  // long enough that a detour doesn't wipe the thread
         if (!dialogue.empty()) {
             out += "Recent conversation:\n";
@@ -2741,7 +2859,7 @@ private:
             if (isRealName(f)) { speaker = f; break; }
         if (speaker.empty() && Clock::now() < convo_until_.load()) speaker = partner_;
         if (s.kind == Stimulus::Speech || s.kind == Stimulus::Typed)
-            mind_.logDialogue(speaker.empty() ? "Someone" : speaker, s.text);
+            logLine(speaker.empty() ? "Someone" : speaker, s.text);
 
         std::string user = mindsLine(mind) + situation(s, sceneDesc);
         std::printf("\n[sense] %s\n", s.text.c_str());
@@ -3107,7 +3225,7 @@ private:
                 std::printf("[say] %s\n", say.c_str());
                 last_said_ = say; last_said_at_ = Clock::now();
                 updateEarsVocabulary();
-                mind_.logDialogue(mind_.name(), say);
+                logLine(mind_.name(), say);
                 noteOffer(say);
                 if (already.empty()) {
                     speak(say);
@@ -4569,6 +4687,12 @@ private:
     Clock::time_point last_check_{};
     std::atomic<bool> checking_{false}, want_glance_{false};              // last reply to someone's words
     std::atomic<bool> looking_up_{false};
+    std::mutex today_mu_, note_mind_mu_;
+    std::unique_ptr<LlmBackend> note_mind_;
+    std::vector<std::string> today_notes_;
+    std::string today_date_ = dayStamp();
+    std::atomic<int> lines_since_note_{0};
+    std::atomic<bool> summarising_{false};
     std::string open_offer_;                            // something he offered to do (guarded by mu_)
     Clock::time_point open_offer_at_{};
     std::atomic<int> seen_n_{int(std::time(nullptr) % 10)};
