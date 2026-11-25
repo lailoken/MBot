@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <filesystem>
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
@@ -134,6 +135,17 @@ int realWordCount(const std::string& t) {
 }
 
 }  // namespace
+
+int nextSlot(const std::string& dir, const std::string& prefix, const std::string& ext, int count) {
+    int best = -1;
+    std::filesystem::file_time_type newest{};
+    std::error_code ec;
+    for (int i = 0; i < count; ++i) {
+        auto t = std::filesystem::last_write_time(dir + "/" + prefix + std::to_string(i) + ext, ec);
+        if (!ec && (best < 0 || t > newest)) { newest = t; best = i; }
+    }
+    return best < 0 ? 0 : best + 1;
+}
 
 Ears::Ears(std::string host, int port, std::string model, int threads, bool use_pc_mic,
            std::string pc_device)
@@ -558,8 +570,9 @@ void Ears::sttLoop() {
         }
         std::string saved_path, save_dir;
         { std::lock_guard<std::mutex> lk(vocab_mu_); save_dir = save_dir_; }
-        if (!save_dir.empty()) {  // 16 kHz mono WAV, rotating 10 files (+ .json: what it was heard as)
-            std::string path = save_dir + "/segment-" + std::to_string(save_n_++ % 10) + ".wav";
+        if (!save_dir.empty()) {  // 16 kHz mono WAV, rotating 50 files (+ .json: what it was heard as)
+            if (save_n_ < 0) save_n_ = nextSlot(save_dir, "segment-", ".wav", 50);
+            std::string path = save_dir + "/segment-" + std::to_string(save_n_++ % 50) + ".wav";
             saved_path = path;
             if (FILE* f = std::fopen(path.c_str(), "wb")) {
                 uint32_t n = uint32_t(item.audio.size()), bytes = n * 2, rate = 16000, br = 32000;

@@ -156,7 +156,7 @@ def debug_index():
     for d, ext, key in (("eyes", ".jpg", "seen"), ("ears", ".wav", "heard")):
         p = os.path.join(DATA, d)
         for f in os.listdir(p) if os.path.isdir(p) else []:
-            if not f.endswith(ext):
+            if not f.endswith(ext) or f.startswith("live."):
                 continue
             name = f[:-len(ext)]
             meta = {}
@@ -212,6 +212,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
+        try:
+            self.send_header("X-Mtime", str(int(os.stat(path).st_mtime)))
+        except OSError:
+            pass
         self.end_headers()
         self.wfile.write(body)
 

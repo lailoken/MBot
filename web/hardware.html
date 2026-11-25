@@ -45,11 +45,12 @@
   .tip{position:fixed;pointer-events:none;background:#0b0f14;border:1px solid var(--line);border-radius:8px;padding:5px 8px;
     font-size:12px;display:none;z-index:5}
   .empty{color:var(--faint);padding:20px;text-align:center}
-  .seen{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
-  .seen figure{margin:0;background:var(--panel2);border-radius:10px;overflow:hidden}
-  .seen img{width:100%;display:block;cursor:zoom-in;aspect-ratio:16/9;object-fit:cover;background:#000}
-  .seen figcaption{padding:7px 9px;font-size:12px;color:var(--dim)}
-  .seen figcaption b{color:var(--ink);font-weight:600} .seen .by{color:var(--faint);font-size:11px}
+  .seen{display:flex;flex-direction:column;gap:10px;max-height:1500px;overflow-y:auto;padding-right:6px}
+  .seen figure{margin:0;background:var(--panel2);border-radius:10px;overflow:hidden;display:flex;gap:14px;align-items:flex-start}
+  .seen img{width:300px;flex:none;display:block;cursor:zoom-in;aspect-ratio:16/9;object-fit:cover;background:#000}
+  .seen figcaption{padding:10px 12px 10px 0;font-size:13px;color:var(--dim);flex:1;min-width:0}
+  .seen figcaption b{color:var(--ink);font-weight:600} .seen .by{color:var(--faint);font-size:11px;margin-top:4px}
+  .live{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap} .live img{width:480px;max-width:100%;border-radius:10px;background:#000;aspect-ratio:16/9;object-fit:cover}
   .clips td{padding:5px 8px 5px 0;border-top:1px solid var(--line);font-size:12.5px;vertical-align:middle}
   .clips audio{height:28px;width:220px}
   .zoom{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;align-items:center;justify-content:center;z-index:9;cursor:zoom-out}
@@ -102,10 +103,12 @@
     <div class="card"><h2>Mind · models</h2><table id="brain"></table>
       <h2 style="margin-top:16px">Libraries</h2><table id="libs"></table></div>
   </div>
-  <div class="card"><h2>What he saw lately · last 10 pictures and what his eyes made of them</h2>
+  <div class="card"><h2>Through his eyes · live <span id="live-age" style="text-transform:none;letter-spacing:0"></span></h2>
+    <div class="live"><img id="live" alt=""><div class="sub" id="live-note">His camera, refreshed every few seconds (only while recent pictures are kept: <code>/debug-media on</code>).</div></div></div>
+  <div class="card"><h2>What he saw lately · last 50 pictures and what his eyes made of them <span id="seen-n" style="text-transform:none;letter-spacing:0"></span></h2>
     <div class="seen" id="seen"></div></div>
-  <div class="card"><h2>What he heard lately · last 10 sound clips and how they were heard</h2>
-    <table class="clips" id="clips"></table></div>
+  <div class="card"><h2>What he heard lately · last 50 sound clips and how they were heard <span id="clips-n" style="text-transform:none;letter-spacing:0"></span></h2>
+    <div class="scrollbox"><table class="clips" id="clips"></table></div></div>
 </div>
 <div class="zoom" id="zoom" onclick="this.style.display='none'"><img id="zimg"><div id="ztxt"></div></div>
 <div class="tip" id="tip"></div>
@@ -257,12 +260,13 @@ for(const [h,l] of [[2,'2 h'],[6,'6 h'],[24,'24 h'],[72,'3 days'],[168,'week'],[
   const c=document.createElement('span');c.className='chip'+(h===range?' on':'');c.textContent=l;
   c.onclick=()=>{range=h;for(const x of $('range').children)x.classList.toggle('on',x===c);history();};$('range').appendChild(c);}
 window.addEventListener('resize',render);
-const OFF='<div class="empty">Not kept right now. Turn on with <code>vtalk /debug-media on</code> (pictures and clips stay on this PC; last 10 each).</div>';
+const OFF='<div class="empty">Not kept right now. Turn on with <code>vtalk /debug-media on</code> (pictures and clips stay on this PC; last 50 each).</div>';
 async function loadDebug(){
   const d=await fetch('debug.json?t='+Date.now(),{cache:'no-store'}).then(r=>r.json()).catch(()=>null); if(!d) return;
   const v=x=>x.file+'?t='+x.t;
   $('seen').innerHTML=d.seen.length?d.seen.map((x,i)=>`<figure><img loading="lazy" src="${esc(v(x))}" data-i="${i}"><figcaption>
     <b>${esc(x.kind||'look')}</b> · ${esc(ago(x.t))}<br>${esc(x.text||'')}<div class="by">${esc(x.by||'')}${x.bytes?' · '+Math.round(x.bytes/1024)+' KB':''}</div></figcaption></figure>`).join(''):OFF;
+  $('seen-n').textContent=d.seen.length?'· '+d.seen.length+' kept, newest first':''; $('clips-n').textContent=d.heard.length?'· '+d.heard.length+' kept':'';
   for(const im of $('seen').querySelectorAll('img')) im.onclick=()=>{const x=d.seen[+im.dataset.i];
     $('zimg').src=v(x); $('ztxt').textContent=(x.kind||'')+' — '+(x.text||''); $('zoom').style.display='flex';};
   $('clips').innerHTML=d.heard.length?d.heard.map(x=>`<tr><td style="white-space:nowrap;color:var(--faint)">${esc(ago(x.t))}</td>
@@ -271,7 +275,16 @@ async function loadDebug(){
     <span style="color:var(--faint)">${x.seconds?' · '+x.seconds.toFixed(1)+' s':''}${x.level!=null?' · level '+Math.round(x.level):''}</span></td></tr>`).join(''):'<tr><td>'+OFF+'</td></tr>';
 }
 const es=new EventSource('/events');
-es.addEventListener('files',m=>{const f=JSON.parse(m.data); if('hardware.json' in f) loadHw(); if('battery_log.jsonl' in f) loadLog(); if('media.json' in f) loadDebug();});
+es.addEventListener('files',m=>{const f=JSON.parse(m.data); if('hardware.json' in f) loadHw(); if('battery_log.jsonl' in f) loadLog(); if('media.json' in f) loadDebug();
+let liveUrl=null;
+async function liveTick(){
+  const r=await fetch('eyes/live.jpg?t='+Date.now(),{cache:'no-store'}).catch(()=>null);
+  if(!r||!r.ok){$('live-age').textContent='· no picture (camera off, or /debug-media off)';return;}
+  const age=Date.now()/1000-(+r.headers.get('X-Mtime')||0), b=await r.blob();
+  if(liveUrl) URL.revokeObjectURL(liveUrl); liveUrl=URL.createObjectURL(b); $('live').src=liveUrl;
+  $('live-age').textContent=age<15?'· '+Math.max(0,Math.round(age))+' s old':'· last frame '+ago(Date.now()/1000-age)+' (camera not delivering?)';
+}
+liveTick(); setInterval(liveTick,3000);});
 loadDebug();
 loadHw().then(loadLog);
 setInterval(()=>{if(hw)$('upd').textContent='updated '+ago(hw.updated);},30000);

@@ -388,6 +388,7 @@ public:
         std::printf("\n[brain] feeling %s\n", mind_.mood().describe().c_str());
 
         loadToday();
+        seen_n_ = nextSlot(mind_dir_ + "/eyes", "seen-", ".jpg", 50);
         if (int64_t ago = int64_t(std::time(nullptr)) - mind_.lastDialogueTime(); mind_.lastDialogueTime() > 0 && ago < 600)
             last_spoke_with_ = Clock::now() - std::chrono::seconds(ago);  // a restart mid-chat keeps the chat
         backfillToday();
@@ -754,7 +755,7 @@ private:
                 if (on) std::filesystem::create_directories(mind_dir_ + "/ears");
                 ears_->saveSegmentsTo(on ? mind_dir_ + "/ears" : "");
             }
-            return std::string("recent pictures and heard clips: ") + (on ? "kept (last 10 each, on this PC only)" : "off") + " (saved)";
+            return std::string("recent pictures and heard clips: ") + (on ? "kept (last 50 each, on this PC only)" : "off") + " (saved)";
         }
         if (cmd == "recognition") {
             if (arg.empty())
@@ -1225,7 +1226,7 @@ private:
     }
     void ambientTick(Clock::time_point now) {
         if (opt_.vision_model.empty() || !opt_.use_camera || ambient_busy_.load() || !robot_up_.load()) return;
-        if (calm_.load() || hushed() || calib_ || now < convo_until_.load() || now - last_ambient_ < std::chrono::minutes(4))
+        if (calm_.load() || hushed() || calib_ || now < convo_until_.load() || now - last_ambient_ < std::chrono::minutes(2))
             return;
         std::string jpeg;
         {
@@ -2219,6 +2220,15 @@ private:
                 std::lock_guard<std::mutex> lk(mu_);
                 frame_ = img.data;
                 frame_time_ = Clock::now();
+                if (opt_.save_eyes) {  // live view for the hardware page (just the latest frame, replaced each time)
+                    try {
+                        std::string dir = mind_dir_ + "/eyes";
+                        std::filesystem::create_directories(dir);
+                        { std::ofstream f(dir + "/live.tmp", std::ios::binary); f.write(img.data.data(), std::streamsize(img.data.size())); }
+                        std::filesystem::rename(dir + "/live.tmp", dir + "/live.jpg");
+                    } catch (...) {
+                    }
+                }
                 if (failures) std::printf("[eyes] camera working\n");
                 failures = 0;
             } else if (++failures == 1) {
@@ -2771,13 +2781,13 @@ private:
         }).detach();
     }
 
-    // Debug view (hardware page): keep the last 10 pictures he looked at, with what he made of them.
+    // Debug view (hardware page): keep the last 50 pictures he looked at, with what he made of them.
     void saveSeen(const std::string& jpeg, const std::string& kind, const std::string& text, const std::string& by = "") {
         if (!opt_.save_eyes || jpeg.empty()) return;
         try {
             std::string dir = mind_dir_ + "/eyes";
             std::filesystem::create_directories(dir);
-            int n = seen_n_.fetch_add(1) % 10;
+            int n = seen_n_.fetch_add(1) % 50;
             std::string base = dir + "/seen-" + std::to_string(n);
             { std::ofstream f(base + ".jpg", std::ios::binary); f.write(jpeg.data(), std::streamsize(jpeg.size())); }
             json m = {{"t", std::time(nullptr)}, {"kind", kind}, {"text", text}, {"by", by}, {"bytes", jpeg.size()}};
@@ -4761,7 +4771,7 @@ private:
     std::atomic<int> offer_replies_{0};
     std::atomic<bool> replying_{false};                 // thinking about an answer to someone's words
     Clock::time_point last_tap_note_{}, last_motion_{};
-    std::atomic<int> seen_n_{int(std::time(nullptr) % 10)};
+    std::atomic<int> seen_n_{0};
     std::atomic<bool> careful_requested_{false};       // next think: a careful online look
     std::string careful_what_;                          // what the mind wanted to look for
     Clock::time_point last_careful_{};

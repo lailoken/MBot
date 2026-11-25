@@ -98,7 +98,7 @@ Permanently: `scripts/mbot-brain.service` and `scripts/mbot-webviz.service` (sys
 `scripts/install-user.sh` links `mbot`, `vtalk` (and `vssh`) into `~/.local/bin`.
 
 Maintenance while he runs: `vtalk /help` - `/status`, `/models`, `/model`, `/fast-model`, `/reflect-model`,
-`/budget`, `/listen-all`, `/robot-hears`, `/battery`, `/battery calibrate`, `/quiet`, `/recognition`, `/debug-media` (last 10 pictures and heard clips on the hardware page), `/voice`, `/ears`, `/reflect`. Changes are saved to `settings.json` in
+`/budget`, `/listen-all`, `/robot-hears`, `/battery`, `/battery calibrate`, `/quiet`, `/recognition`, `/debug-media` (live camera view plus the last 50 pictures and heard clips on the hardware page), `/voice`, `/ears`, `/reflect`. Changes are saved to `settings.json` in
 his data folder and override the service flags.
 
 Useful commands: `mbot info | say <text> | snap | faces | listen --mic tap | mind | people | usage |

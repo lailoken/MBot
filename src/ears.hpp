@@ -36,6 +36,10 @@ struct Heard {
     DoaObs doa;             // where it came from (time differences between his 4 mics), if measured
 };
 
+// Rotating debug files dir/<prefix>N<ext>, N < count: the slot after the newest one (so a restart keeps
+// the latest files instead of overwriting them).
+int nextSlot(const std::string& dir, const std::string& prefix, const std::string& ext, int count);
+
 class Ears {
 public:
     // pc_device: PipeWire/Pulse source name for the PC mic ("" = system default).
@@ -95,7 +99,7 @@ private:
     std::function<void(const Heard&)> on_heard_;
     std::function<void(const std::string&)> log_;
     std::string save_dir_;
-    int save_n_ = 0;
+    int save_n_ = -1;  // next rotating slot (-1: continue after the newest file on disk)
     void log(const std::string& m) { if (log_) log_(m); }
 
     std::atomic<bool> running_{false};
