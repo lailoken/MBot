@@ -34,11 +34,13 @@ Everything about his mind is stored **locally** as plain files. Images never lea
 
 ## Requirements
 
-- An Anki/DDL **Vector** with **root SSH** and an SDK gateway. Tested on **WireOS 3.0.2.36d**.
+- An Anki/DDL **Vector** with SDK access (wire-pod / WireOS, Escape Pod, or a GUID), ideally with **root SSH**
+  for constant hearing (without it he listens after "Hey Vector", or through the PC's microphone). Tested on
+  **WireOS 3.0.2.36d**.
   How a robot gets there, every robot-side change, and how to undo each one:
   **[`docs/ROBOT_MODIFICATIONS.md`](docs/ROBOT_MODIFICATIONS.md)**.
-- Linux PC (developed on Fedora/Nobara; Debian/Ubuntu supported by the installer), C++17 toolchain,
-  `podman` (to cross-build the robot pieces). A GPU is optional (faster speech-to-text and local models).
+- Linux PC or a 64-bit Raspberry Pi (developed on Fedora/Nobara; Debian/Ubuntu/Raspberry Pi OS supported by the
+  installer), C++17 toolchain, `podman` (only to cross-build the robot pieces). A GPU is optional (faster speech-to-text and local models).
 - For the mind: an Anthropic API key, and/or [Ollama](https://ollama.com) for free local models.
 
 **GPU or not.** Everything runs on a CPU-only PC. A GPU just makes some parts faster:
@@ -50,11 +52,37 @@ Everything about his mind is stored **locally** as plain files. Images never lea
 | Free local mind (Ollama) | slow but works; Claude is the quick option | quick |
 | Direction of sound, voice recognition, memory | CPU (light) | same |
 
-**Small machines (e.g. a Raspberry Pi).** Untested, but the core is plain C++ and should build anywhere.
-With Claude as the mind, the host mostly moves audio and text: use `--whisper models/ggml-base.en.bin`
-(smaller, faster speech-to-text) and either run blind (`--no-vision`) or point his eyes at Ollama on another
-machine with `--vision-url http://OTHER-PC:11434/v1`. Local language models are impractical there, and the
-optional voice-recognition library is fetched for x86-64 only.
+### Raspberry Pi and other small machines
+
+Untested on a Pi so far (reports welcome), but the core is plain C++ and builds with the normal
+Raspberry Pi OS (Debian) packages. Use the **64-bit** OS (Pi 4 / Pi 5): `./install.sh` then fetches the ARM64
+build of the optional voice-recognition library; on 32-bit or other CPUs voice recognition just stays off.
+With Claude as the mind, a Pi mostly moves audio and text. Your choices, best to cheapest:
+
+1. **A PC with a GPU** (any vendor): fast hearing (~50 ms a sentence), local eyes, a free offline mind.
+   It can sit next to whatever your Pi already runs (wire-pod, Escape Pod).
+2. **A PC without a GPU**: everything works, slower (about a second to hear, a few seconds per look).
+3. **The Pi, eyes elsewhere**: run MBot on the Pi and let another machine's Ollama do the seeing:
+   `--vision-url http://OTHER-PC:11434/v1`.
+4. **The Pi alone**: Claude as the mind, `--whisper models/ggml-base.en.bin` (smaller, faster speech-to-text;
+   expect roughly 1-3 s a sentence) and `--no-vision`. He hears, talks, remembers and has moods but doesn't watch
+   the room - he can still look **on request** ("look carefully", "what can you read on my screen"): that one
+   picture goes to Claude (about half a cent a look). Web lookups cost about a cent each. Both count toward his
+   daily budget (`--budget`, default $1/day).
+
+Local language models (the free offline mind) and the local vision model are too heavy for a Pi.
+
+### Already using wire-pod or Escape Pod?
+
+MBot doesn't replace your voice server; it talks to Vector over the SDK connection (gRPC) next to it.
+- **wire-pod / WireOS**: `mbot setup <robot-ip>` finds the robot's SDK port by itself (unlocked firmware
+  needs no certificate or token).
+- **Escape Pod / stock firmware**: SDK access needs the robot's certificate and a GUID token. If your robot
+  already works with the Python SDK (e.g. you ran the community SDK's `configure_pod` for Escape Pod),
+  MBot reads the very same `~/.anki_vector/sdk_config.ini` - copy it to the machine that runs MBot; or pass
+  the GUID yourself: `mbot setup <robot-ip> --guid <GUID>`.
+- **Hearing without "Hey Vector"** (constant listening) needs root SSH on the robot (WireOS / unlocked, see
+  `docs/ROBOT_MODIFICATIONS.md`). Without it MBot still works; he just listens after the wake word.
 
 ## Install
 

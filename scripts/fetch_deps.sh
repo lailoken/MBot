@@ -41,7 +41,13 @@ if [ -z "$NO_VOICE_ID" ]; then
   # sherpa-onnx C API + ONNX Runtime, prebuilt (Apache-2.0 / MIT)
   if [ ! -f "$TP/sherpa-onnx/lib/libsherpa-onnx-c-api.so" ]; then
     V=v2.0.3
-    T=sherpa-onnx-$V-linux-x64-shared-no-tts-lib
+    case "$(uname -m)" in
+      x86_64|amd64) T=sherpa-onnx-$V-linux-x64-shared-no-tts-lib ;;
+      aarch64|arm64) T=sherpa-onnx-$V-linux-aarch64-shared-cpu ;;   # 64-bit Raspberry Pi OS, other ARM boards
+      *) echo "sherpa-onnx: no prebuilt for $(uname -m) - voice recognition stays off (everything else works)"; T="" ;;
+    esac
+  fi
+  if [ ! -f "$TP/sherpa-onnx/lib/libsherpa-onnx-c-api.so" ] && [ -n "$T" ]; then
     tmp=$(mktemp -d)
     fetch "https://github.com/k2-fsa/sherpa-onnx/releases/download/$V/$T.tar.bz2" "$tmp/s.tar.bz2"
     tar xjf "$tmp/s.tar.bz2" -C "$tmp"
@@ -52,7 +58,7 @@ if [ -z "$NO_VOICE_ID" ]; then
          "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/$V/sherpa-onnx/c-api/c-api.h"
     curl -fsSL -o "$TP/sherpa-onnx/LICENSE" "https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/$V/LICENSE"
     rm -rf "$tmp"
-  else
+  elif [ -f "$TP/sherpa-onnx/lib/libsherpa-onnx-c-api.so" ]; then
     echo "sherpa-onnx: present"
   fi
   # WeSpeaker CAM++ speaker model (Apache-2.0; trained on VoxCeleb, CC BY 4.0)
