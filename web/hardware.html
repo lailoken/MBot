@@ -119,7 +119,7 @@ const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;',
 const ACT={charging:['#5fd38d','charging'],'on charger':['#3f8f6a','on charger (full)'],active:['#ff6b8a','moving / active'],
   idle:['#ffb454','idle off charger'],dozing:['#6aa6ff','dozing'],'heading home':['#b48cff','heading home'],
   calibrating:['#e6edf3','calibration run']};
-let hw=null, log=[], range=24;
+let hw=null, log=[], range=2;
 const ago=t=>{const s=Date.now()/1000-t;return s<90?'just now':s<3600?Math.round(s/60)+' min ago':s<86400?Math.round(s/3600)+' h ago':Math.round(s/86400)+' days ago';};
 const fmtT=t=>new Date(t*1000).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
 const rows=(el,list)=>{$(el).innerHTML=list.filter(r=>r&&r[1]!=null&&r[1]!=='').map(([k,v,cls])=>`<tr><td class="k">${esc(k)}</td><td class="v ${cls||''}">${v}</td></tr>`).join('')||'<tr><td class="empty">—</td></tr>';};
