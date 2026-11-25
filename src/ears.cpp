@@ -67,7 +67,7 @@ bool readExact(int fd, void* buf, size_t n, const std::atomic<bool>& running) {
 bool isJunk(const std::string& t) {
     if (t.size() < 2) return true;
     static const char* junk[] = {"[BLANK_AUDIO]", "(silence)", "[ Silence ]", "[silence]",
-                                 "Thank you.",    "Thanks for watching!", "you", "Bye.",
+                                 "Thank you.",    "Thanks for watching!", "Thanks for watching.", "Thank you for watching.", "you", "Bye.",
                                  "(upbeat music)", "[Music]", "(music)", "*music*"};
     for (auto* j : junk)
         if (t == j) return true;
@@ -75,6 +75,23 @@ bool isJunk(const std::string& t) {
     if ((t.front() == '[' && t.back() == ']') || (t.front() == '(' && t.back() == ')') ||
         (t.front() == '*' && t.back() == '*'))
         return true;
+    return false;
+}
+
+// For the words-only second pass on a noisy clip: whisper forced to produce words invents its stock phrases
+// (YouTube outros, "thank you", a sentence said twice). Those don't count as someone talking.
+bool looksInvented(const std::string& t) {
+    std::string l;
+    for (char c : t) if (std::isalpha(static_cast<unsigned char>(c)) || c == ' ') l += char(std::tolower(static_cast<unsigned char>(c)));
+    static const char* stock[] = {"watching", "subscribe", "thank you", "thanks", "see you next", "bye"};
+    for (auto* x : stock) if (l.find(x) != std::string::npos) return true;
+    // the same sentence twice ("It's not good. It's not good.")
+    auto dot = t.find_first_of(".!?");
+    if (dot != std::string::npos && dot + 1 < t.size()) {
+        std::string a = t.substr(0, dot + 1), b = t.substr(dot + 1);
+        b.erase(0, b.find_first_not_of(' '));
+        if (!a.empty() && b.rfind(a, 0) == 0) return true;
+    }
     return false;
 }
 
@@ -164,7 +181,7 @@ void Ears::muteFor(std::chrono::milliseconds d) {
 
 void Ears::setMuted(bool m) {
     muted_ = m;
-    if (!m) muteFor(std::chrono::milliseconds(500));  // let the speaker's echo die down
+    if (!m) muteFor(std::chrono::milliseconds(250));  // the speaker's echo is gone in ~150 ms; longer clips quick replies
 }
 
 bool Ears::isMuted() const { return muted_ || nowMs() < mute_until_ms_.load(); }
@@ -383,7 +400,17 @@ void Ears::onFrame(const int16_t* s, size_t n, uint32_t rate) {
     if (rms > peak_.load()) peak_ = rms;
 
     if (isMuted()) {
-        if (dir_open_) { dir_->end(); dir_open_ = false; }
+        DoaCapture cap;
+        if (dir_open_) { cap = dir_->end(); dir_open_ = false; }
+        // Someone was mid-sentence when he started a sound of his own: keep what they said so far
+        // (it used to be thrown away, so words spoken just before he talked/animated were lost).
+        if (in_speech_ && utter_.size() >= 16000 * 9 / 10) {
+            std::lock_guard<std::mutex> lk(qmu_);
+            queue_.push_back({std::move(utter_), float(rms_sum_ / std::max(1, rms_n_)), std::move(cap)});
+            if (queue_.size() > 4) queue_.pop_front();
+            qcv_.notify_one();
+            log("  (kept the words heard before he made a sound)");
+        }
         in_speech_ = false;
         utter_.clear();
         pre_roll_.clear();
@@ -400,7 +427,7 @@ void Ears::onFrame(const int16_t* s, size_t n, uint32_t rate) {
         if (rms < floor * 2.f || rms < 200.f) floor = floor * 0.995f + rms * 0.005f;
         floor_ = std::max(20.f, floor);
         pre_roll_.insert(pre_roll_.end(), f.begin(), f.end());
-        if (pre_roll_.size() > 4800) pre_roll_.erase(pre_roll_.begin(), pre_roll_.end() - 4800);
+        if (pre_roll_.size() > 9600) pre_roll_.erase(pre_roll_.begin(), pre_roll_.end() - 9600);  // 0.6 s: soft first words
         loud_run_ = loud ? loud_run_ + 1 : std::max(0, loud_run_ - 1);
         if (loud_run_ >= 6) {  // ~60 ms of sustained sound
             char b[96];
@@ -440,7 +467,7 @@ void Ears::onFrame(const int16_t* s, size_t n, uint32_t rate) {
     }
 }
 
-std::string Ears::transcribe(const std::vector<float>& pcm, float* no_speech) {
+std::string Ears::transcribe(const std::vector<float>& pcm, float* no_speech, bool words_only) {
     std::vector<float> x(pcm.size());
     for (size_t i = 0; i < pcm.size(); ++i) x[i] = pcm[i] / 32768.f;
     auto p = whisper_full_default_params(WHISPER_SAMPLING_GREEDY);
@@ -452,6 +479,7 @@ std::string Ears::transcribe(const std::vector<float>& pcm, float* no_speech) {
     p.print_timestamps = false;
     p.print_special = false;
     p.suppress_blank = true;
+    p.suppress_nst = words_only;  // no [SOUND] labels: words or nothing
     std::string prompt;  // must outlive whisper_full
     { std::lock_guard<std::mutex> lk(vocab_mu_); prompt = vocab_; }
     if (!prompt.empty()) p.initial_prompt = prompt.c_str();  // household names, not near-sounding words
@@ -543,6 +571,17 @@ void Ears::sttLoop() {
         std::snprintf(b, sizeof b, "segment %.1fs level %.0f -> \"%s\" (no-speech %.2f, %.0f ms)",
                       item.audio.size() / 16000.0, item.loudness, text.c_str(), no_speech, ms);
         log(b);
+        // Whisper names the loudest thing in a clip. When he beeps/squeaks (his own animations, which the
+        // ears can't always mute) while someone talks, the whole clip comes back as "[SQUEAKING]" and the
+        // words are lost. So a clip labelled as a sound gets a second pass that may only produce words; it
+        // counts only if whisper is confident it's speech and gives a few real words (not a hallucination).
+        if (!text.empty() && isJunk(text) && item.audio.size() >= 16000 * 11 / 10) {
+            float ns2 = 1;
+            std::string words = transcribe(item.audio, &ns2, true);
+            bool ok = !words.empty() && !isJunk(words) && !looksInvented(words) && ns2 < 0.15f && realWordCount(words) >= 3;
+            log(std::string("  under the noise: \"") + words + "\"" + (ok ? " - kept" : " - not speech"));
+            if (ok) { text = words; no_speech = ns2; }
+        }
         if (text.empty() || isJunk(text)) { log("  dropped: empty/noise"); continue; }
         if (no_speech > 0.6f) { log("  dropped: whisper thinks it's not speech"); continue; }
         if (realWordCount(text) == 0) { log("  dropped: no real words (filler/garble)"); continue; }

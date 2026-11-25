@@ -1927,8 +1927,30 @@ private:
             } else if (++failures == 1) {
                 std::printf("[eyes] camera not delivering frames; will keep trying quietly\n");
             }
-            // Fresh frame every few seconds when it works; back off when it doesn't.
-            int wait = failures ? std::min(300, 30 * failures) : 4;
+            // Self-repair: the robot's camera daemon sometimes freezes (a sensor error, then no frames until
+            // it's restarted; his face detection goes blind too). Awake, connected, and still no frame after
+            // ~1.5 min: restart the camera services on the robot (needs root SSH; at most every 10 min).
+            // If that didn't bring frames back, the next try (3 min later) also restarts vic-engine (his vision
+            // pipeline can stay wedged after the camera recovers); he reconnects by himself in ~25 s.
+            bool repaired = false;
+            if (!failures) cam_repairs_ = 0;
+            auto gap = cam_repairs_ ? std::chrono::minutes(3) : std::chrono::minutes(10);
+            if (failures >= 3 && cam_repairs_ < 2 && !calm_.load() && robot_up_.load() &&
+                Clock::now() - last_cam_repair_ > gap) {
+                last_cam_repair_ = Clock::now();
+                bool engine = cam_repairs_++ > 0;
+                std::printf("[eyes] camera stuck - restarting the camera services%s on the robot\n",
+                            engine ? " and his vision engine (vic-engine)" : "");
+                std::string out = shellRobot(std::string("systemctl restart mm-qcamera-daemon; sleep 2; "
+                                             "systemctl restart mm-anki-camera") +
+                                             (engine ? "; sleep 3; systemctl restart vic-engine" : "") + " && echo restarted");
+                repaired = out.find("restarted") != std::string::npos;
+                std::printf("[eyes] %s\n", repaired ? "restarted" : "couldn't restart them (no SSH to the robot?)");
+                if (engine && repaired) wait_extra_ = 30;
+            }
+            // Fresh frame every few seconds when it works; back off (to a minute) when it doesn't.
+            int wait = repaired ? 10 + wait_extra_ : failures ? std::min(60, 20 * failures) : 4;
+            wait_extra_ = 0;
             for (int i = 0; i < wait * 10 && !g_quit; ++i)
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
@@ -4211,6 +4233,8 @@ private:
 
     // robot-state edge detection (event thread only)
     bool touched_ = false, picked_ = false;
+    Clock::time_point last_cam_repair_{};                // camera self-repair (rate limit)
+    int cam_repairs_ = 0, wait_extra_ = 0;               // repairs since the camera last worked
     std::atomic<bool> calm_{false};                     // body is dozing (calm power mode)
     std::atomic<Clock::time_point> wake_override_until_{Clock::time_point{}};
     vpb::ControlRequest::Priority control_prio_ = vpb::ControlRequest::DEFAULT;

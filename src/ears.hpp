@@ -72,7 +72,7 @@ public:
     bool connected() const { return connected_.load(); }
 
     // Offline helper: transcribe 16 kHz mono float samples.
-    std::string transcribe(const std::vector<float>& pcm16k, float* no_speech = nullptr);
+    std::string transcribe(const std::vector<float>& pcm16k, float* no_speech = nullptr, bool words_only = false);
 
 private:
     void netLoop();
