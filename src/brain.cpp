@@ -2392,10 +2392,16 @@ private:
                 out += "- (" + when + ") " + mem.text + "\n";
             }
         }
-        auto dialogue = mind_.recentDialogue(10);
+        auto dialogue = mind_.recentDialogue(24);  // long enough that a detour doesn't wipe the thread
         if (!dialogue.empty()) {
             out += "Recent conversation:\n";
             for (auto& [who, text] : dialogue) out += "  " + who + ": " + text + "\n";
+        }
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (!open_offer_.empty() && Clock::now() - open_offer_at_ < std::chrono::minutes(5))
+                out += "You recently offered: \"" + open_offer_ + "\" - not done yet. If they said yes (speech-to-text "
+                       "often garbles a short yes, e.g. \"look it up\" heard as \"look at that\"), do it now.\n";
         }
         {
             std::lock_guard<std::mutex> lk(mu_);
@@ -2550,6 +2556,16 @@ private:
         }
         return out;
     }
+
+    // He offered to do something ("Want me to look it up?"): remember it until it's done or 5 min pass.
+    void noteOffer(const std::string& say) {
+        static const std::regex offer(R"(\b(want me to|shall i|should i|i could|i can|would you like me to|let me)\b[^.?!]*)",
+                                      std::regex::icase);
+        std::smatch m;
+        std::lock_guard<std::mutex> lk(mu_);
+        if (std::regex_search(say, m, offer)) { open_offer_ = m.str(); open_offer_at_ = Clock::now(); }
+    }
+    void offerDone() { std::lock_guard<std::mutex> lk(mu_); open_offer_.clear(); }
 
     // Look something up online (in the background); the answer comes back to his mind as a new moment.
     void lookUp(const std::string& query) {
@@ -2961,6 +2977,7 @@ private:
             else if (type == "head") vec_.setHeadDeg(amount);
             else if (type == "lift") vec_.setLift(amount > 1.f ? amount / 100.f : amount);
             else if (type == "look") {
+                offerDone();
                 bool cam_live;
                 { std::lock_guard<std::mutex> lk(mu_); cam_live = !frame_.empty(); }
                 if (!cam_live) {
@@ -2974,6 +2991,7 @@ private:
                 }
             }
             else if (type == "look_closely") {
+                offerDone();
                 if (Clock::now() - last_careful_ < std::chrono::seconds(20)) {
                     std::printf("[act] (ignoring repeated careful look)\n");
                 } else {
@@ -2984,7 +3002,7 @@ private:
                          " Tell them what you can make out.", 4, true});
                 }
             }
-            else if (type == "look_up") lookUp(name);
+            else if (type == "look_up") { offerDone(); lookUp(name); }
             else if (type == "look_around") vec_.lookAround();
             else if (type == "cube_lights") vec_.flashCube();
             else if (type == "play_with_cube") play_cube_after_ = true;
@@ -3090,6 +3108,7 @@ private:
                 last_said_ = say; last_said_at_ = Clock::now();
                 updateEarsVocabulary();
                 mind_.logDialogue(mind_.name(), say);
+                noteOffer(say);
                 if (already.empty()) {
                     speak(say);
                 } else {  // only what the stream hadn't said yet
@@ -4550,6 +4569,8 @@ private:
     Clock::time_point last_check_{};
     std::atomic<bool> checking_{false}, want_glance_{false};              // last reply to someone's words
     std::atomic<bool> looking_up_{false};
+    std::string open_offer_;                            // something he offered to do (guarded by mu_)
+    Clock::time_point open_offer_at_{};
     std::atomic<int> seen_n_{int(std::time(nullptr) % 10)};
     std::atomic<bool> careful_requested_{false};       // next think: a careful online look
     std::string careful_what_;                          // what the mind wanted to look for
