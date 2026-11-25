@@ -526,6 +526,10 @@ public:
             ambientTick(now);
             if (voice_dl_done_.exchange(false) && opt_.recognition) loadVoiceId();
             if (!got) conversationTick(now);
+            if (want_glance_.exchange(false) && facesInView(5).empty() && !hushed() && !speaking_.load()) {
+                std::printf("[ears] (glancing up at whoever is talking)\n");
+                withBody([&] { return vec_.setHeadDeg(25.f); });
+            }
             if (turn_pending_.exchange(false) && !hushed()) {
                 last_turn_ = now;
                 float deg = turn_to_.load();
@@ -712,6 +716,20 @@ private:
             return std::string("direction of sound: ") +
                    (dir_.connected() ? "connected to the robot's raw mics" : "not connected (needs the robot's mictap with :9098)") +
                    "\n" + dir_model_.summary() + "\n(/ears reset to start over)";
+        }
+        if (cmd == "debug-media") {  // last 10 pictures + heard clips, shown on the hardware page
+            bool on = opt_.save_eyes;
+            if (arg.empty())
+                return std::string("keeping recent pictures and heard clips for the hardware page: ") + (on ? "on" : "off") +
+                       " (/debug-media on|off)";
+            if (auto e = onoff(on); !e.empty()) return e;
+            opt_.save_eyes = opt_.save_ears = on;
+            saveSetting("debug-media", on);
+            if (ears_) {
+                if (on) std::filesystem::create_directories(mind_dir_ + "/ears");
+                ears_->saveSegmentsTo(on ? mind_dir_ + "/ears" : "");
+            }
+            return std::string("recent pictures and heard clips: ") + (on ? "kept (last 10 each, on this PC only)" : "off") + " (saved)";
         }
         if (cmd == "recognition") {
             if (arg.empty())
@@ -1201,6 +1219,7 @@ private:
                 "List the distinct physical objects you can clearly see (not people, not walls or floor), as a JSON "
                 "array of short lowercase names, e.g. [\"mug\", \"laptop\"]. Only the array.", &err);
             ambient_busy_ = false;
+            saveSeen(jpeg, "look around (" + key + ")", list, opt_.vision_model);
             auto a = list.find('['), b = list.rfind(']');
             if (a == std::string::npos || b == std::string::npos || b < a) return;
             json arr;
@@ -1336,6 +1355,78 @@ private:
         }
         return d;
     }
+    // Shares a meaningful word with the last few lines of our conversation ("screen", "picture"...)?
+    bool sameTopic(const std::string& text) {
+        static const std::set<std::string> stop = {"that", "this", "what", "with", "have", "your", "about", "there",
+            "they", "them", "then", "than", "just", "like", "know", "think", "really", "would", "could", "should",
+            "been", "were", "when", "where", "which", "while", "will", "from", "here", "some", "very", "want",
+            "going", "doing", "okay", "yeah", "well", "right", "something", "anything", "tell", "said", "says",
+            "vector", "look", "talking", "because", "maybe", "it's", "that's", "don't", "can't", "i'm", "you're"};
+        auto words = [&](const std::string& t) {
+            std::set<std::string> w;
+            std::string cur;
+            for (char c : t + " ") {
+                if (std::isalpha(static_cast<unsigned char>(c)) || c == '\'') cur += char(std::tolower(static_cast<unsigned char>(c)));
+                else {
+                    if (cur.size() >= 4 && !stop.count(cur)) {
+                        if (cur.size() > 4 && cur.back() == 's') cur.pop_back();  // screens -> screen
+                        w.insert(cur);
+                    }
+                    cur.clear();
+                }
+            }
+            return w;
+        };
+        auto mine = words(text);
+        if (mine.empty()) return false;
+        for (auto& [who, line] : mind_.recentDialogue(6))
+            for (auto& w : words(line))
+                if (mine.count(w)) return true;
+        return false;
+    }
+
+    // Not sure a sentence was for him: turn toward the voice (if he knows where it came from and can turn),
+    // raise his head, and see if someone is looking at him. If so, answer it; if not, it was overheard.
+    void checkIfForMe(const Heard& h) {
+        float pb = 0, pc = 0;
+        bool have = h.doa.ok && dir_model_.predict(h.doa, pb, pc) && pc >= 0.4f;
+        checking_ = true;
+        std::printf("[ears] (not sure that was for me - looking%s to check)\n",
+                    have ? (" toward the voice, " + bearingWords(pb)).c_str() : " up");
+        std::string text = h.text;
+        auto audio = h.audio;
+        bool can_turn = have && std::fabs(pb) > 20.f && !on_charger_.load() && !brownout_safe_ && !picked_;
+        std::thread([this, text, audio, can_turn, pb] {
+            auto t0 = Clock::now();
+            withBody([&] {
+                if (can_turn) vec_.turnDeg(pb);
+                vec_.setHeadDeg(25.f);  // faces are usually above him
+                return true;
+            });
+            bool seen = false;
+            while (Clock::now() - t0 < std::chrono::milliseconds(3500) && !g_quit) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+                for (auto& f : recentFaces(std::chrono::milliseconds(1200)))
+                    if (f.at > t0 && (f.frontal || isRealName(f.who))) seen = true;
+                if (seen) break;
+            }
+            if (seen) {
+                std::printf("[ears] someone's looking at me - that was for me\n");
+                std::lock_guard<std::mutex> lk(speech_mu_);
+                speech_buf_ += (speech_buf_.empty() ? "" : " ") + text;
+                if (audio) speech_pcm_.insert(speech_pcm_.end(), audio->begin(), audio->end());
+                if (!speech_audio_) speech_audio_ = audio;
+                speech_at_ = Clock::now();
+            } else {
+                std::printf("[ears] nobody looking at me - just overheard\n");
+                std::lock_guard<std::mutex> lk(mu_);
+                overheard_.push_back(text);
+                if (overheard_.size() > 6) overheard_.pop_front();
+            }
+            checking_ = false;
+        }).detach();
+    }
+
     // A hint for the mind about where the voice came from, when that tells it something.
     std::string directionHint(const SpeechDir& d) {
         if (!d.ok || d.conf < 0.5f) return "";
@@ -1641,6 +1732,23 @@ private:
             if (h.audio) speech_pcm_.insert(speech_pcm_.end(), h.audio->begin(), h.audio->end());
             if (!speech_audio_) speech_audio_ = h.audio;  // the first piece (introductions come first)
             speech_at_ = Clock::now();
+        } else if (Clock::now() - last_spoke_with_ < std::chrono::minutes(10) && sameTopic(h.text)) {
+            // Not named, no face in view - but it's what we were just talking about: it's for him.
+            std::printf("[ears] (same topic as our chat - taking it as meant for me)\n");
+            SpeechDir d = noteVoiceDirection(h, true);
+            std::lock_guard<std::mutex> lk(speech_mu_);
+            if (d.ok && (!speech_dir_.ok || d.conf > speech_dir_.conf)) speech_dir_ = d;
+            speech_buf_ += (speech_buf_.empty() ? "" : " ") + h.text;
+            if (h.audio) speech_pcm_.insert(speech_pcm_.end(), h.audio->begin(), h.audio->end());
+            if (!speech_audio_) speech_audio_ = h.audio;
+            speech_at_ = Clock::now();
+            want_glance_ = true;
+        } else if (words >= 3 && !hushed() && !calib_ && !checking_.load() &&
+                   (Clock::now() - last_spoke_with_ < std::chrono::minutes(10) || personPresent()) &&
+                   Clock::now() - last_check_ > std::chrono::seconds(15)) {
+            // Unsure: like a person would, turn toward the voice and look. Someone looking back = it was for him.
+            last_check_ = Clock::now();
+            checkIfForMe(h);
         } else {
             std::printf("[ears] (overheard - not addressed to me; say \"Vector\" or face me)\n");
             // Overheard: keep it as context; occasionally react if someone is around.
@@ -2433,6 +2541,21 @@ private:
         return out;
     }
 
+    // Debug view (hardware page): keep the last 10 pictures he looked at, with what he made of them.
+    void saveSeen(const std::string& jpeg, const std::string& kind, const std::string& text, const std::string& by = "") {
+        if (!opt_.save_eyes || jpeg.empty()) return;
+        try {
+            std::string dir = mind_dir_ + "/eyes";
+            std::filesystem::create_directories(dir);
+            int n = seen_n_.fetch_add(1) % 10;
+            std::string base = dir + "/seen-" + std::to_string(n);
+            { std::ofstream f(base + ".jpg", std::ios::binary); f.write(jpeg.data(), std::streamsize(jpeg.size())); }
+            json m = {{"t", std::time(nullptr)}, {"kind", kind}, {"text", text}, {"by", by}, {"bytes", jpeg.size()}};
+            std::ofstream(base + ".json") << m.dump() << "\n";
+        } catch (...) {
+        }
+    }
+
     // "look carefully", "look closely", "what can you read", "read my screen", "what does it say"...
     bool wantsCarefulLook(const Stimulus& s) {
         if (careful_requested_.exchange(false)) return true;
@@ -2478,6 +2601,7 @@ private:
                     std::printf("[eyes %.1fs online %s, %zu KB] %s\n", std::chrono::duration<double>(Clock::now() - t0).count(),
                                 opt_.detail_vision_model.c_str(), jpeg.size() / 1024, seen.c_str());
                     if (how) *how = "online";
+                    saveSeen(jpeg, "careful look: " + question, seen, opt_.detail_vision_model);
                     return seen;
                 }
             }
@@ -2489,6 +2613,7 @@ private:
         if (!seen.empty()) {
             std::printf("[eyes %.1fs local, careful] %s\n", std::chrono::duration<double>(Clock::now() - t0).count(), seen.c_str());
             if (how) *how = "local";
+            saveSeen(jpeg, "careful look: " + question, seen, opt_.vision_model + " (local)");
         }
         return seen;
     }
@@ -2546,6 +2671,7 @@ private:
                 double dt = std::chrono::duration<double>(Clock::now() - t0).count();
                 if (!sceneDesc.empty()) {
                     noteSight(sceneDesc);
+                    saveSeen(jpeg, "glance: " + s.text.substr(0, 80), sceneDesc, opt_.vision_model);
                     last_image_sent_ = Clock::now();
                     std::printf("[eyes %.1fs local] %s\n", dt, sceneDesc.c_str());
                 } else {
@@ -3884,6 +4010,7 @@ for i in 1 2 3 4 5 6 7 8 9 10; do cat $d/vph_pwr 2>/dev/null; done | awk -F'[: ]
             "clothing. Be factual and brief. Do not guess names.", &verr);
         if (seen.empty()) { *reason = "I couldn't see clearly"; return false; }
         std::printf("[faces] camera sees: %s\n", seen.c_str());
+        saveSeen(jpeg, "learning a face", seen, opt_.vision_model);
         if (seen_out) *seen_out = seen;
         json schema = {{"type", "object"}, {"additionalProperties", false},
                        {"properties", {{"one_person", {{"type", "boolean"}}},
@@ -4379,7 +4506,10 @@ private:
     Clock::time_point last_level_beat_{};   // 5-minute ears heartbeat in the log
     std::atomic<bool> robot_up_{true}, robot_returned_{false};
     std::atomic<bool> look_requested_{false};
-    Clock::time_point last_spoke_with_{};              // last reply to someone's words
+    Clock::time_point last_spoke_with_{};
+    Clock::time_point last_check_{};
+    std::atomic<bool> checking_{false}, want_glance_{false};              // last reply to someone's words
+    std::atomic<int> seen_n_{int(std::time(nullptr) % 10)};
     std::atomic<bool> careful_requested_{false};       // next think: a careful online look
     std::string careful_what_;                          // what the mind wanted to look for
     Clock::time_point last_careful_{};
@@ -4539,6 +4669,7 @@ static BrainOptions withLocalSettings(const BrainOptions& base, const std::strin
         if (s.contains("budget")) o.daily_budget = s["budget"].get<double>();
         if (s.contains("listen-all")) o.listen_all = s["listen-all"].get<bool>();
         if (s.contains("recognition")) o.recognition = s["recognition"].get<bool>();
+        if (s.contains("debug-media")) o.save_eyes = o.save_ears = s["debug-media"].get<bool>();
         std::printf("[brain] local settings applied from settings.json\n");
     } catch (const std::exception& e) {
         std::fprintf(stderr, "[brain] settings.json unreadable (%s) - using the flags\n", e.what());

@@ -48,7 +48,7 @@ public:
     // Diagnostics: every detected segment, transcription and drop reason.
     void setLogger(std::function<void(const std::string&)> log) { log_ = std::move(log); }
     // Debug: keep the last few detected segments as WAV files in this directory.
-    void saveSegmentsTo(const std::string& dir) { save_dir_ = dir; }
+    void saveSegmentsTo(const std::string& dir) { std::lock_guard<std::mutex> lk(vocab_mu_); save_dir_ = dir; }
     void stop();
     // Use Vector's OWN microphones via the on-robot mictap daemon (TCP, wake-word
     // triggered, works anywhere Vector roams). Disables the PC mic / :8193 source.

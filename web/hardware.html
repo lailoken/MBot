@@ -45,6 +45,15 @@
   .tip{position:fixed;pointer-events:none;background:#0b0f14;border:1px solid var(--line);border-radius:8px;padding:5px 8px;
     font-size:12px;display:none;z-index:5}
   .empty{color:var(--faint);padding:20px;text-align:center}
+  .seen{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
+  .seen figure{margin:0;background:var(--panel2);border-radius:10px;overflow:hidden}
+  .seen img{width:100%;display:block;cursor:zoom-in;aspect-ratio:16/9;object-fit:cover;background:#000}
+  .seen figcaption{padding:7px 9px;font-size:12px;color:var(--dim)}
+  .seen figcaption b{color:var(--ink);font-weight:600} .seen .by{color:var(--faint);font-size:11px}
+  .clips td{padding:5px 8px 5px 0;border-top:1px solid var(--line);font-size:12.5px;vertical-align:middle}
+  .clips audio{height:28px;width:220px}
+  .zoom{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;align-items:center;justify-content:center;z-index:9;cursor:zoom-out}
+  .zoom img{max-width:96vw;max-height:80vh} .zoom div{position:absolute;bottom:20px;left:5vw;right:5vw;color:#e6edf3;font-size:14px;text-align:center}
 </style>
 </head>
 <body>
@@ -93,7 +102,12 @@
     <div class="card"><h2>Mind · models</h2><table id="brain"></table>
       <h2 style="margin-top:16px">Libraries</h2><table id="libs"></table></div>
   </div>
+  <div class="card"><h2>What he saw lately · last 10 pictures and what his eyes made of them</h2>
+    <div class="seen" id="seen"></div></div>
+  <div class="card"><h2>What he heard lately · last 10 sound clips and how they were heard</h2>
+    <table class="clips" id="clips"></table></div>
 </div>
+<div class="zoom" id="zoom" onclick="this.style.display='none'"><img id="zimg"><div id="ztxt"></div></div>
 <div class="tip" id="tip"></div>
 
 <script>
@@ -241,8 +255,22 @@ for(const [h,l] of [[2,'2 h'],[6,'6 h'],[24,'24 h'],[72,'3 days'],[168,'week'],[
   const c=document.createElement('span');c.className='chip'+(h===range?' on':'');c.textContent=l;
   c.onclick=()=>{range=h;for(const x of $('range').children)x.classList.toggle('on',x===c);history();};$('range').appendChild(c);}
 window.addEventListener('resize',render);
+const OFF='<div class="empty">Not kept right now. Turn on with <code>vtalk /debug-media on</code> (pictures and clips stay on this PC; last 10 each).</div>';
+async function loadDebug(){
+  const d=await fetch('debug.json?t='+Date.now(),{cache:'no-store'}).then(r=>r.json()).catch(()=>null); if(!d) return;
+  const v=x=>x.file+'?t='+x.t;
+  $('seen').innerHTML=d.seen.length?d.seen.map((x,i)=>`<figure><img loading="lazy" src="${esc(v(x))}" data-i="${i}"><figcaption>
+    <b>${esc(x.kind||'look')}</b> · ${esc(ago(x.t))}<br>${esc(x.text||'')}<div class="by">${esc(x.by||'')}${x.bytes?' · '+Math.round(x.bytes/1024)+' KB':''}</div></figcaption></figure>`).join(''):OFF;
+  for(const im of $('seen').querySelectorAll('img')) im.onclick=()=>{const x=d.seen[+im.dataset.i];
+    $('zimg').src=v(x); $('ztxt').textContent=(x.kind||'')+' — '+(x.text||''); $('zoom').style.display='flex';};
+  $('clips').innerHTML=d.heard.length?d.heard.map(x=>`<tr><td style="white-space:nowrap;color:var(--faint)">${esc(ago(x.t))}</td>
+    <td><audio controls preload="none" src="${esc(v(x))}"></audio></td>
+    <td><b>${esc(x.text||'')}</b><br><span class="${(x.verdict||'').startsWith('heard')?'ok':'warn'}">${esc(x.verdict||'')}</span>
+    <span style="color:var(--faint)">${x.seconds?' · '+x.seconds.toFixed(1)+' s':''}${x.level!=null?' · level '+Math.round(x.level):''}</span></td></tr>`).join(''):'<tr><td>'+OFF+'</td></tr>';
+}
 const es=new EventSource('/events');
-es.addEventListener('files',m=>{const f=JSON.parse(m.data); if('hardware.json' in f) loadHw(); if('battery_log.jsonl' in f) loadLog();});
+es.addEventListener('files',m=>{const f=JSON.parse(m.data); if('hardware.json' in f) loadHw(); if('battery_log.jsonl' in f) loadLog(); if('media.json' in f) loadDebug();});
+loadDebug();
 loadHw().then(loadLog);
 setInterval(()=>{if(hw)$('upd').textContent='updated '+ago(hw.updated);},30000);
 </script>

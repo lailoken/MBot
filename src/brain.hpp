@@ -50,6 +50,7 @@ struct BrainOptions {
     // (--recognition, or `vtalk "/recognition on"`), because it stores biometric data about people.
     bool recognition = false;
     bool save_ears = false;       // keep the last 10 heard segments as WAV files in <data>/ears (debugging)
+    bool save_eyes = false;       // keep the last 10 pictures he looked at (+ what he made of them) in <data>/eyes
     bool debug_ears = false;      // print every segment / transcription to the terminal       // typed lines count as speech (handy for testing)
     uint32_t volume = 80;
     // Battery care: head to the charger below min %, and (only when a person is around) leave it

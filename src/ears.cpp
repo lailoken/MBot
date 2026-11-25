@@ -17,6 +17,8 @@
 #include <cstring>
 
 #include "whisper.h"
+#include <nlohmann/json.hpp>
+#include <ctime>
 
 namespace mbot {
 
@@ -543,9 +545,10 @@ void Ears::sttLoop() {
             item = std::move(queue_.front());
             queue_.pop_front();
         }
-        std::string saved_path;
-        if (!save_dir_.empty()) {  // 16 kHz mono WAV, rotating 10 files
-            std::string path = save_dir_ + "/segment-" + std::to_string(save_n_++ % 10) + ".wav";
+        std::string saved_path, save_dir;
+        { std::lock_guard<std::mutex> lk(vocab_mu_); save_dir = save_dir_; }
+        if (!save_dir.empty()) {  // 16 kHz mono WAV, rotating 10 files (+ .json: what it was heard as)
+            std::string path = save_dir + "/segment-" + std::to_string(save_n_++ % 10) + ".wav";
             saved_path = path;
             if (FILE* f = std::fopen(path.c_str(), "wb")) {
                 uint32_t n = uint32_t(item.audio.size()), bytes = n * 2, rate = 16000, br = 32000;
@@ -560,7 +563,6 @@ void Ears::sttLoop() {
                     std::fwrite(&x, 2, 1, f);
                 }
                 std::fclose(f);
-                log("  saved " + path);
             }
         }
         float no_speech = 0;
@@ -582,9 +584,20 @@ void Ears::sttLoop() {
             log(std::string("  under the noise: \"") + words + "\"" + (ok ? " - kept" : " - not speech"));
             if (ok) { text = words; no_speech = ns2; }
         }
-        if (text.empty() || isJunk(text)) { log("  dropped: empty/noise"); continue; }
-        if (no_speech > 0.6f) { log("  dropped: whisper thinks it's not speech"); continue; }
-        if (realWordCount(text) == 0) { log("  dropped: no real words (filler/garble)"); continue; }
+        auto meta = [&](const std::string& verdict) {
+            if (saved_path.empty()) return;
+            std::string mp = saved_path.substr(0, saved_path.size() - 4) + ".json";
+            if (FILE* f = std::fopen(mp.c_str(), "w")) {
+                nlohmann::json m = {{"t", std::time(nullptr)}, {"text", text}, {"seconds", item.audio.size() / 16000.0},
+                                    {"level", item.loudness}, {"no_speech", no_speech}, {"verdict", verdict}};
+                std::fputs(m.dump().c_str(), f);
+                std::fclose(f);
+            }
+        };
+        if (text.empty() || isJunk(text)) { log("  dropped: empty/noise"); meta("dropped: noise"); continue; }
+        if (no_speech > 0.6f) { log("  dropped: whisper thinks it's not speech"); meta("dropped: not speech"); continue; }
+        if (realWordCount(text) == 0) { log("  dropped: no real words (filler/garble)"); meta("dropped: no real words"); continue; }
+        meta("heard");
         Heard h;
         h.text = text;
         h.seconds = float(item.audio.size()) / 16000.f;

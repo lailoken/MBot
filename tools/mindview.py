@@ -23,7 +23,7 @@ DATA = os.path.abspath(os.path.expanduser(args.data))
 LOG = os.path.join(DATA, "brain_service.log")
 WATCH = ["self.json", "people.json", "usage.json", "status.json", "brownout_safe", "memories.jsonl",
          "hardware.json", "battery_log.jsonl"]
-MEDIA_DIRS = ["photos", "voices"]        # people's photos (+ face position) and name voice samples
+MEDIA_DIRS = ["photos", "voices", "eyes", "ears"]        # people's photos (+ face position) and name voice samples
 SERVE = set(WATCH)                       # data files the page may fetch (nothing else from the data dir)
 HISTORY = 80
 
@@ -150,6 +150,27 @@ def media_index():
             out["voices"].append(os.path.splitext(f)[0])
     return out
 
+def debug_index():
+    """Recent pictures he looked at (eyes/) and heard clips (ears/), newest first, with what he made of them."""
+    out = {"seen": [], "heard": []}
+    for d, ext, key in (("eyes", ".jpg", "seen"), ("ears", ".wav", "heard")):
+        p = os.path.join(DATA, d)
+        for f in os.listdir(p) if os.path.isdir(p) else []:
+            if not f.endswith(ext):
+                continue
+            name = f[:-len(ext)]
+            meta = {}
+            try:
+                with open(os.path.join(p, name + ".json")) as m:
+                    meta = json.load(m)
+            except Exception:
+                pass
+            meta["file"] = d + "/" + f
+            meta.setdefault("t", int(os.stat(os.path.join(p, f)).st_mtime))
+            out[key].append(meta)
+        out[key].sort(key=lambda m: -m.get("t", 0))
+    return out
+
 def watch_files():
     seen = {}
     while True:
@@ -203,8 +224,8 @@ class Handler(BaseHTTPRequestHandler):
                                   "text/html; charset=utf-8")
         if path == "/events":
             return self.events()
-        if path == "/media.json":
-            body = json.dumps(media_index()).encode()
+        if path in ("/media.json", "/debug.json"):
+            body = json.dumps(media_index() if path == "/media.json" else debug_index()).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
@@ -215,7 +236,7 @@ class Handler(BaseHTTPRequestHandler):
         name = path.lstrip("/")
         if name in SERVE:
             return self.send_file(os.path.join(DATA, name), "application/json" if name.endswith(".json") else "text/plain; charset=utf-8")
-        if (name.startswith("photos/") or name.startswith("voices/")) and ".." not in name and name.count("/") == 1:
+        if name.split("/")[0] in ("photos", "voices", "eyes", "ears") and ".." not in name and name.count("/") == 1:
             ext = name.rsplit(".", 1)[-1].lower()
             ctype = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp",
                      "wav": "audio/wav"}.get(ext)

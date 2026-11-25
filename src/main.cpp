@@ -471,6 +471,7 @@ int main(int argc, char** argv) {
             else if (args[i] == "--mic") o.mic = next();
             else if (args[i] == "--no-camera") o.use_camera = false;
             else if (args[i] == "--save-ears") o.save_ears = true;
+            else if (args[i] == "--save-eyes") o.save_eyes = true;
             else if (args[i] == "--input-fifo") o.input_fifo = next();
             else if (args[i] == "--vision-model") o.vision_model = next();
             else if (args[i] == "--no-vision") o.vision_model.clear();
