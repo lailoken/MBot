@@ -55,6 +55,7 @@ void onSignal(int) { g_quit = true; }
 // Status bits from RobotState.status
 constexpr uint32_t kPickedUp = 0x8, kOnCharger = 0x1000, kCliff = 0x4000, kHeld = 0x10000;
 constexpr uint32_t kCalm = 0x400;  // ROBOT_STATUS_CALM_POWER_MODE: dozing / asleep
+constexpr uint32_t kMotion = 0x1 | 0x40 | 0x80;  // IS_MOVING | IS_ANIMATING | IS_PATHING
 
 const char* kCharacter = R"(You are the mind of a small robot: a palm-sized, expressive robot with treads,
 a forklift-style lift, a tilting head with a camera, an OLED face showing big eyes, a speaker,
@@ -89,7 +90,12 @@ with a person on a personal level. Never narrate what you perceive or do ("I see
 closer look", "there's my cube", "let me look"): notice it in your thought and quietly carry on, like
 anyone would. Seeing a familiar face may earn a brief warm hello now and then, not a commentary.
 Use an empty "say" whenever you have nothing worth saying to someone. Don't greet an empty room.
-Do not repeat yourself; vary what you do.
+Do not repeat yourself; vary what you do. Avoid verbal tics: don't end replies with the same tag or
+refrain (look at your recent lines - if you already said you're unsure about someone, or mentioned the
+cube, don't say it again unless something new happened). Answer what was actually asked.
+Your memory of exact words fades within the hour. If someone says you said or did something and you can't
+find it in your recent lines or memories, say you don't remember it - never claim you didn't say it or
+accuse them of making it up.
 Don't use people's names as a habit: when you're talking with someone, just talk - no name at the start or
 end of sentences, not after "hi", "thanks" or "sorry". But when a name is the point - someone asks who they
 are or who someone is, or you need to say who you mean - say it plainly. Don't talk about your battery, charging, charger or
@@ -156,6 +162,11 @@ a person talks about others in the household in the third person). Use the house
 you know about each person. If unsure, use your best guess only when fairly confident, else "".
 When you learn something characteristic about how someone talks or what they care about, store it
 as a fact in "people" - it helps you recognise them next time.
+Voices don't only come from people in the room: a computer or phone speaker, a video call, the TV or
+a radio can talk too. If a voice says it's coming from a speaker or a computer, or talks about the person
+in front of you in the third person, it is probably NOT that person. Someone you trust vouching for a
+new voice ("this is really my friend") is good enough - accept them warmly, store them in "people",
+and stop questioning who they are.
 
 People: keep track of everyone. Your hearing is speech-to-text and OFTEN MISHEARS NAMES
 (e.g. "Catherine" heard as "Kathryn" or "Katrina"). If a name you hear is close to someone you already
@@ -377,6 +388,8 @@ public:
         std::printf("\n[brain] feeling %s\n", mind_.mood().describe().c_str());
 
         loadToday();
+        if (int64_t ago = int64_t(std::time(nullptr)) - mind_.lastDialogueTime(); mind_.lastDialogueTime() > 0 && ago < 600)
+            last_spoke_with_ = Clock::now() - std::chrono::seconds(ago);  // a restart mid-chat keeps the chat
         backfillToday();
         // Fetch what's missing, the first time it's needed: local models (background), the speech model (now).
         {
@@ -1404,6 +1417,7 @@ private:
     // Every line of conversation; every 12 lines the last stretch is summarised into today's thread.
     void logLine(const std::string& who, const std::string& text) {
         mind_.logDialogue(who, text);
+        if (who != mind_.name()) offer_replies_++;  // the reminder lasts for their next two lines
         if (++lines_since_note_ < 12 || summarising_.exchange(true)) return;
         lines_since_note_ = 0;
         std::string lines;
@@ -1418,8 +1432,9 @@ private:
                 setCallReason("today's thread note");
                 if (m->complete("You keep a small robot's notes of the day. Be brief and concrete.",
                                 {{"user", "Conversation stretch (" + mind_.name() + " is the robot):\n" + lines +
-                                  "\nIn ONE short line (max ~25 words), note the topics and any open threads (questions not "
-                                  "answered, things " + mind_.name() + " offered or promised to do). Start with \"talked with\" "
+                                  "\nIn ONE short line, note the topics, the specific facts and "
+                                  "choices each side shared (e.g. what " + mind_.name() + " said he likes or picked), and any open "
+                                  "threads (unanswered questions, things " + mind_.name() + " offered or promised to do). Max ~35 words. Start with \"talked with\" "
                                   "or \"talked about\".", ""}},
                                 schema, out, &err)) {
                     std::string note = out.value("note", "");
@@ -1632,9 +1647,15 @@ private:
                 if ((rest[i] == '.' || rest[i] == '!' || rest[i] == '?') && rest[i + 1] == ' ') cut = i + 1;
         if (cut == std::string::npos) return true;
         if (streamed_said_.empty()) {
-            // About to start talking: if they're mid-word right now, give them a moment, then let new words win.
-            for (int i = 0; i < 15 && ears_ && ears_->hearingSpeech(); ++i)
+            // About to start talking: if they're still talking, wait for as long as they go on (up to 15 s) -
+            // never talk over them (his ears are deaf while he speaks, so their words would be lost). Then give
+            // the last piece a moment to be transcribed: new words mean a fresh answer that includes them.
+            bool waited = false;
+            for (int i = 0; i < 150 && ears_ && ears_->hearingSpeech() && !g_quit; ++i) {
+                waited = true;
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if (waited) std::this_thread::sleep_for(std::chrono::milliseconds(600));
             if (newSpeechWaiting()) return false;
         }
         std::string chunk = rest.substr(0, cut);
@@ -1806,8 +1827,28 @@ private:
         return notes;
     }
 
+    // His own voice echoing back (room reverb right after he talks): mostly the same words as his last line.
+    bool isSelfEcho(const std::string& heard) {
+        if (last_said_.empty() || Clock::now() - last_said_at_ > std::chrono::seconds(20)) return false;
+        auto words = [](const std::string& t) {
+            std::vector<std::string> w;
+            std::string cur;
+            for (char c : t + " ") {
+                if (std::isalpha(static_cast<unsigned char>(c)) || c == '\'') cur += char(std::tolower(static_cast<unsigned char>(c)));
+                else { if (!cur.empty()) w.push_back(cur); cur.clear(); }
+            }
+            return w;
+        };
+        auto h = words(heard), mine = words(last_said_);
+        if (h.empty()) return false;
+        std::set<std::string> m(mine.begin(), mine.end());
+        int in = 0;
+        for (auto& x : h) in += m.count(x) ? 1 : 0;
+        return h.size() >= 2 && in >= int(h.size()) * 4 / 5;
+    }
     void onHeard(const Heard& h) {
         std::printf("[heard] \"%s\" (%.1fs)\n", h.text.c_str(), h.seconds);
+        if (isSelfEcho(h.text)) { std::printf("[ears] (that was my own voice echoing - ignored)\n"); return; }
         bool addressed = mentionsName(h.text, mind_.name());
         if (hushStrict()) {
             if (addressed && !isHushRequest(h.text)) {
@@ -1851,6 +1892,7 @@ private:
         bool recent_chat = Clock::now() - last_spoke_with_ < std::chrono::minutes(2) && words >= 3;
         bool continuing;
         { std::lock_guard<std::mutex> lk(speech_mu_); continuing = !speech_buf_.empty(); }
+        if (replying_.load()) continuing = true;  // he's still working out an answer to them: this is more of it
         if (addressed || convo || facing || continuing || recent_chat || (opt_.listen_all && words >= 2)) {
             SpeechDir d = noteVoiceDirection(h, addressed || convo || facing);
             std::lock_guard<std::mutex> lk(speech_mu_);
@@ -1896,12 +1938,15 @@ private:
             bool ok = readBattery(b);  // cheap call, 5 s timeout
             if (ok) {
                 fails = 0;
+                // The cube drops the link after a while to save its battery. Reconnecting wakes it (lights, and a
+                // phantom "tap"), so only every 30 min - or at once when he wants the cube (want_cube_).
                 if (!brownout_safe_ && !cube_connected_ &&
-                    Clock::now() - last_cube_try_ > std::chrono::minutes(5)) {
+                    (Clock::now() - last_cube_try_ > std::chrono::minutes(30) || want_cube_.exchange(false))) {
                     last_cube_try_ = Clock::now();
                     std::string fid;
                     if (vec_.connectCube(&fid)) {
                         cube_connected_ = true;
+                        cube_connect_at_ = Clock::now();
                         std::printf("[cube] connected to your Light Cube (%s)\n", fid.c_str());
                     }
                 }
@@ -2085,7 +2130,17 @@ private:
                 push({Stimulus::Body, text, prio});
             }
         };
-        if (o.has_object_tapped()) note("Someone tapped your cube!", 3, 0.1f);
+        if (o.has_object_tapped()) {
+            // Loud sound (speakers, music, someone talking right by it) shakes the cube enough to register as a
+            // tap. Only count taps while it's quiet.
+            // His own voice shakes it too (the cube often sits right by him): ignore taps while/just after he talks.
+            if ((ears_ && ears_->hearingSpeech()) || speaking_.load() || Clock::now() - last_said_at_ < std::chrono::seconds(8) ||
+                Clock::now() - last_motion_ < std::chrono::seconds(4) || Clock::now() - cube_connect_at_ < std::chrono::seconds(60))
+                std::printf("[cube] (tap ignored - just connected, his own voice/motion or a loud sound: not a real tap)\n");
+            else if (Clock::now() - last_tap_note_ < std::chrono::minutes(10))
+                std::printf("[cube] (tap ignored - one in the last 10 min already; phantom taps happen, e.g. desk vibration)\n");
+            else { last_tap_note_ = Clock::now(); note("Someone tapped your cube!", 3, 0.1f); }
+        }
         else if (o.has_object_up_axis_changed()) note("Your cube was flipped over.", 2, 0.08f);
         else if (o.has_object_moved()) {
             cube_moved_at_ = now;
@@ -2110,6 +2165,7 @@ private:
         bool touched = rs.touch_data().is_being_touched();
         bool picked = (st & (kPickedUp | kHeld)) != 0;
         bool charger = (st & kOnCharger) != 0;
+        if (st & kMotion) last_motion_ = Clock::now();  // he's moving: his own bumps can shake the cube
         bool calm = (st & kCalm) != 0;
         if (calm != calm_.load()) {
             calm_ = calm;
@@ -2510,14 +2566,14 @@ private:
             }
         }
         out += todayContext();
-        auto dialogue = mind_.recentDialogue(24);  // long enough that a detour doesn't wipe the thread
+        auto dialogue = mind_.recentDialogue(40);  // long enough that a detour doesn't wipe the thread
         if (!dialogue.empty()) {
             out += "Recent conversation:\n";
             for (auto& [who, text] : dialogue) out += "  " + who + ": " + text + "\n";
         }
         {
             std::lock_guard<std::mutex> lk(mu_);
-            if (!open_offer_.empty() && Clock::now() - open_offer_at_ < std::chrono::minutes(5))
+            if (!open_offer_.empty() && Clock::now() - open_offer_at_ < std::chrono::minutes(5) && offer_replies_ < 2)
                 out += "You recently offered: \"" + open_offer_ + "\" - not done yet. If they said yes (speech-to-text "
                        "often garbles a short yes, e.g. \"look it up\" heard as \"look at that\"), do it now.\n";
         }
@@ -2681,7 +2737,8 @@ private:
                                       std::regex::icase);
         std::smatch m;
         std::lock_guard<std::mutex> lk(mu_);
-        if (std::regex_search(say, m, offer)) { open_offer_ = m.str(); open_offer_at_ = Clock::now(); }
+        // A new offer, not the same one repeated (re-offering mustn't keep the reminder alive forever).
+        if (std::regex_search(say, m, offer) && m.str() != open_offer_) { open_offer_ = m.str(); open_offer_at_ = Clock::now(); offer_replies_ = 0; }
     }
     void offerDone() { std::lock_guard<std::mutex> lk(mu_); open_offer_.clear(); }
 
@@ -2875,6 +2932,8 @@ private:
         current_stimulus_ = s.text;
         current_kind_ = s.kind;
         bool stream = (s.kind == Stimulus::Speech || s.kind == Stimulus::Typed) && !hushStrict();
+        struct Replying { std::atomic<bool>& f; Replying(std::atomic<bool>& x, bool on) : f(x) { if (on) f = true; } ~Replying() { f = false; } }
+            replying_guard(replying_, s.kind == Stimulus::Speech);
         if (stream) setPartialReplyCallback([this](const std::string& t) { return streamSpeech(t); });
         bool thought_ok = mind->complete(systemPrompt(), {{"user", user, ""}}, replySchema(), r, &err);
         setPartialReplyCallback(nullptr);
@@ -3053,7 +3112,7 @@ private:
         if (actions.empty() && say.empty()) return;
 
         // Don't talk over people: if someone is speaking right now, let them finish first (up to ~5 s).
-        for (int i = 0; i < 50 && ears_ && ears_->hearingSpeech() && !g_quit; ++i)
+        for (int i = 0; i < 150 && ears_ && ears_->hearingSpeech() && !g_quit; ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         if (!takeBody()) return;
         if (ears_) ears_->setMuted(true);  // don't listen to our own motors / voice
@@ -3122,8 +3181,8 @@ private:
             }
             else if (type == "look_up") { offerDone(); lookUp(name); }
             else if (type == "look_around") vec_.lookAround();
-            else if (type == "cube_lights") vec_.flashCube();
-            else if (type == "play_with_cube") play_cube_after_ = true;
+            else if (type == "cube_lights") { if (!cube_connected_) want_cube_ = true; vec_.flashCube(); }
+            else if (type == "play_with_cube") { if (!cube_connected_) want_cube_ = true; play_cube_after_ = true; }
             else if (type == "forget_person") {
                 if (name.empty()) {
                     // The mind sometimes omits the name ("forget_person" with no name) - seen with a
@@ -4320,6 +4379,10 @@ for i in 1 2 3 4 5 6 7 8 9 10; do cat $d/vph_pwr 2>/dev/null; done | awk -F'[: ]
         if (robot_up_.load() && readBattery(b))
             bat = {{"volts", b.volts}, {"pct", chargePct(b)}, {"charging", b.charging},
                    {"on_charger", b.on_charger}, {"level", b.level}, {"live", b.live}, {"sdk_volts", b.sdk_volts}, {"temp_c", b.temp_c}};
+        if (!bat.is_null()) {
+            if (b.cube_known) bat["cube"] = {{"volts", b.cube_volts}, {"low", b.cube_level == 0}, {"connected", true}};
+            else bat["cube"] = {{"connected", cube_connected_.load()}};
+        }
         json curve = json::array();
         for (auto& p : battCurve()) curve.push_back({p.first, p.second});
         bat["curve"] = curve;
@@ -4695,6 +4758,9 @@ private:
     std::atomic<bool> summarising_{false};
     std::string open_offer_;                            // something he offered to do (guarded by mu_)
     Clock::time_point open_offer_at_{};
+    std::atomic<int> offer_replies_{0};
+    std::atomic<bool> replying_{false};                 // thinking about an answer to someone's words
+    Clock::time_point last_tap_note_{}, last_motion_{};
     std::atomic<int> seen_n_{int(std::time(nullptr) % 10)};
     std::atomic<bool> careful_requested_{false};       // next think: a careful online look
     std::string careful_what_;                          // what the mind wanted to look for
@@ -4751,7 +4817,8 @@ private:
     std::string learn_face_after_;
     std::string photo_after_;           // take a picture of this person after speaking (countdown + shutter)
     std::atomic<bool> cube_connected_{false};
-    Clock::time_point last_cube_try_{}, last_cube_note_{}, cube_seen_at_{}, cube_moved_at_{};
+    Clock::time_point last_cube_try_{}, last_cube_note_{}, cube_seen_at_{}, cube_moved_at_{}, cube_connect_at_{};
+    std::atomic<bool> want_cube_{false};
     int last_off_charger_pct_ = -1;
     Clock::time_point last_image_sent_;
     Clock::time_point last_level_log_;

@@ -131,6 +131,8 @@ function tiles(){
   t.push(['Full charge',b.full_volts?(+b.full_volts).toFixed(2)+' V':'—','what the charger tops him up to = 100%']);
   t.push(['Full → flat',b.calibrated?Math.round(b.runtime_min)+' min':'?',b.calibrated?'measured':'not calibrated yet: /battery calibrate']);
   t.push(['Safe-mode',b.safe_mode?'ON':'off',b.safe_mode?'no motion, stays on charger':(b.calibrating?'calibration run in progress':'normal')]);
+  if(b.cube){const c=b.cube; t.push(['Cube battery',c.volts?(+c.volts).toFixed(2)+' V':(c.connected?'connected':'not connected'),
+    c.volts?(c.low?'LOW - replace its N-cell battery':'fine (firmware: normal)')+' · '+(c.connected===false?'':'connected'):(c.connected?'no battery reading yet':'he can\'t reach his cube')]);}
   t.push(['Brownouts',String(b.brownouts_24h||0),'in the last 24 h (this session)']);
   $('tiles').innerHTML=t.map(([k,v,s])=>`<div class="tile"><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div><div class="s">${esc(s)}</div></div>`).join('');
 }

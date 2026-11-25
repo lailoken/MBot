@@ -862,7 +862,7 @@ void Mind::logDialogue(const std::string& who, const std::string& text) {
     {
         std::lock_guard<std::mutex> lk(mu_);
         dialogue_.push_back({who, text, int64_t(std::time(nullptr))});
-        if (dialogue_.size() > 30) dialogue_.erase(dialogue_.begin());
+        if (dialogue_.size() > 60) dialogue_.erase(dialogue_.begin());
     }
     std::ofstream f(path("journal.log"), std::ios::app);
     std::time_t t = std::time(nullptr);
@@ -1236,6 +1236,11 @@ std::string Mind::householdSummary() const {
     std::string out = ss.str();
     if (out.empty()) return "";
     return "Household: " + out + ".\n" + (soon.tellp() > 0 ? "Birthdays: " + soon.str() + "\n" : "");
+}
+
+int64_t Mind::lastDialogueTime() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return dialogue_.empty() ? 0 : std::get<2>(dialogue_.back());
 }
 
 std::vector<std::pair<std::string, std::string>> Mind::recentDialogue(size_t n) const {

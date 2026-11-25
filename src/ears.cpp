@@ -97,6 +97,16 @@ bool looksInvented(const std::string& t) {
     return false;
 }
 
+// Phrases whisper produces from noise even on a first pass (YouTube-style filler from its training data).
+bool looksStock(const std::string& t) {
+    std::string l;
+    for (char c : t) l += char(std::tolower(static_cast<unsigned char>(c)));
+    static const char* stock[] = {"i'm going to do a little bit", "thanks for watching", "thank you for watching",
+                                  "please subscribe", "like and subscribe", "see you in the next video"};
+    for (auto* x : stock) if (l.find(x) != std::string::npos) return true;
+    return false;
+}
+
 // Real words only: count tokens of 2+ letters that aren't filler noises. Garble like "Hmm.",
 // "Uh", "Mm-hmm", "..." scores 0 and never reaches the mind (or the paid AI).
 int realWordCount(const std::string& t) {
@@ -438,6 +448,7 @@ void Ears::onFrame(const int16_t* s, size_t n, uint32_t rate) {
             in_speech_ = true;
             if (dir_ && dir_->connected()) { dir_->begin(); dir_open_ = true; }
             utter_ = pre_roll_;
+            pre_roll_.clear();  // used up: else the next piece starts with stale audio (words from before)
             quiet_run_ = 0;
             rms_sum_ = 0;
             rms_n_ = 0;
@@ -594,6 +605,7 @@ void Ears::sttLoop() {
                 std::fclose(f);
             }
         };
+        if (!text.empty() && looksStock(text)) { log("  dropped: a stock phrase speech-to-text invents"); meta("dropped: invented"); continue; }
         if (text.empty() || isJunk(text)) { log("  dropped: empty/noise"); meta("dropped: noise"); continue; }
         if (no_speech > 0.6f) { log("  dropped: whisper thinks it's not speech"); meta("dropped: not speech"); continue; }
         if (realWordCount(text) == 0) { log("  dropped: no real words (filler/garble)"); meta("dropped: no real words"); continue; }

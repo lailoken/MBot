@@ -152,6 +152,7 @@ public:
     // ---- conversation transcript (short-term) ----
     void logDialogue(const std::string& who, const std::string& text);
     std::vector<std::pair<std::string, std::string>> recentDialogue(size_t n) const;
+    int64_t lastDialogueTime() const;  // unix seconds of the last line (0 = none)
 
     // ---- pronunciation (applied only when speaking; memories keep real spelling) ----
     void setPronunciation(const std::string& word, const std::string& spoken);  // "" removes
