@@ -38,7 +38,7 @@ usage: mbot [-r ROBOT] <command> [args]
   say <text...>           speak with Vector's voice
   demo                    take control and wiggle: head, lift, eyes, turn, anim
   snap [out.jpg]          save one camera frame
-  events                  print the robot's event stream (faces, touch, ...)
+  events [--state]        print the robot's event stream (faces, touch, ...); --state: status flags
   anims                   list animation triggers on the robot
   enroll-face <name>      teach Vector to recognize a face (look at his camera)
   faces                   list the faces the robot has enrolled
@@ -425,7 +425,12 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (cmd == "events") {
-        vec.events([](const vpb::Event& e) {
+        bool state = !args.empty() && args[0] == "--state";  // only the robot's status flags (hex), one per event
+        vec.events([state](const vpb::Event& e) {
+            if (state) {
+                if (e.has_robot_state()) { std::printf("status 0x%x\n", e.robot_state().status()); std::fflush(stdout); }
+                return true;
+            }
             if (e.has_robot_state() || e.has_keep_alive()) return true;  // too chatty
             std::printf("%s\n", e.ShortDebugString().c_str());
             std::fflush(stdout);

@@ -208,7 +208,11 @@ void Ears::setMuted(bool m) {
     if (!m) muteFor(std::chrono::milliseconds(250));  // the speaker's echo is gone in ~150 ms; longer clips quick replies
 }
 
-bool Ears::isMuted() const { return muted_ || nowMs() < mute_until_ms_.load(); }
+void Ears::setMotionMuted(bool m) {
+    if (motion_muted_.exchange(m) && !m) muteFor(std::chrono::milliseconds(300));  // motor/speaker tail
+}
+
+bool Ears::isMuted() const { return muted_ || motion_muted_ || nowMs() < mute_until_ms_.load(); }
 
 void Ears::netLoop() {
     int backoff_s = 0;

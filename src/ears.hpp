@@ -68,6 +68,8 @@ public:
     // Ignore the mic while Vector itself is talking/animating (it hears itself).
     void muteFor(std::chrono::milliseconds d);
     void setMuted(bool m);
+    // While his body moves or animates (motors, his own animation sounds): deaf, plus a short tail after.
+    void setMotionMuted(bool m);
     // Someone is talking right now (the voice detector is inside an utterance).
     bool hearingSpeech() const { return in_speech_.load() && !isMuted(); }
 
@@ -105,7 +107,7 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> connected_{false};
     bool warned_ = false;  // net thread only
-    std::atomic<bool> muted_{false};
+    std::atomic<bool> muted_{false}, motion_muted_{false};
     std::atomic<int64_t> mute_until_ms_{0};
     std::thread net_, stt_, pc_, tap_;
     bool use_tap_ = false;

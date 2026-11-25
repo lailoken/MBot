@@ -55,7 +55,7 @@ void onSignal(int) { g_quit = true; }
 // Status bits from RobotState.status
 constexpr uint32_t kPickedUp = 0x8, kOnCharger = 0x1000, kCliff = 0x4000, kHeld = 0x10000;
 constexpr uint32_t kCalm = 0x400;  // ROBOT_STATUS_CALM_POWER_MODE: dozing / asleep
-constexpr uint32_t kMotion = 0x1 | 0x40 | 0x80;  // IS_MOVING | IS_ANIMATING | IS_PATHING
+constexpr uint32_t kMotion = 0x1 | 0x80;  // IS_MOVING (any motor: wheels, head, lift) | IS_PATHING. Not IS_ANIMATING (0x40): his eyes animate nearly all the time
 
 const char* kCharacter = R"(You are the mind of a small robot: a palm-sized, expressive robot with treads,
 a forklift-style lift, a tilting head with a camera, an OLED face showing big eyes, a speaker,
@@ -2167,6 +2167,9 @@ private:
         bool picked = (st & (kPickedUp | kHeld)) != 0;
         bool charger = (st & kOnCharger) != 0;
         if (st & kMotion) last_motion_ = Clock::now();  // he's moving: his own bumps can shake the cube
+        // Deaf while his body moves or animates (motor whine, his own beeps and squeaks); words someone was
+        // halfway through are kept (see Ears), and he hears again 0.3 s after he stops.
+        if (ears_) ears_->setMotionMuted((st & kMotion) != 0);
         bool calm = (st & kCalm) != 0;
         if (calm != calm_.load()) {
             calm_ = calm;
@@ -3559,8 +3562,26 @@ for i in 1 2 3 4 5 6 7 8 9 10; do cat $d/vph_pwr 2>/dev/null; done | awk -F'[: ]
             b.volts = live_batt_.vph;
             b.live = true;
         }
+        // Off the charger a cell only runs down: readings bounce up and down with load (motors sag it, rest lets it
+        // recover), so hold the lowest seen since he left the charger. Reset on the charger, after a gap in
+        // readings (switched off), or when a clearly higher reading lasts 5 minutes (e.g. a new battery).
+        if (b.on_charger || b.volts < 1.f) {
+            held_v_ = 0;
+        } else {
+            if (held_v_ > 0 && now - held_at_ > std::chrono::minutes(3)) held_v_ = 0;  // gap: start afresh
+            if (held_v_ <= 0 || b.volts <= held_v_) { held_v_ = b.volts; higher_since_ = {}; }
+            else if (b.volts > held_v_ + 0.15f) {
+                if (higher_since_.time_since_epoch().count() == 0) higher_since_ = now;
+                else if (now - higher_since_ > std::chrono::minutes(5)) { held_v_ = b.volts; higher_since_ = {}; }
+            } else higher_since_ = {};
+            held_at_ = now;
+            b.raw_volts = b.volts;
+            b.volts = held_v_;
+        }
         return true;
     }
+    float held_v_ = 0;                                   // lowest off-charger reading (guarded by live_mu_)
+    Clock::time_point held_at_{}, higher_since_{};
     // State of charge for a reading. On this firmware the voltage freezes once he leaves the charger (seen: the
     // exact same 4.044 V for a 50-minute run until he died), so off the charger, once a run time is measured, the
     // charge is also counted down by the clock from what he had when he left; the lower of the two wins.
@@ -4455,8 +4476,9 @@ for i in 1 2 3 4 5 6 7 8 9 10; do cat $d/vph_pwr 2>/dev/null; done | awk -F'[: ]
                         : b.on_charger ? "on charger" : (t - last_body_at_.load() < 90) ? "active"
                         : calm_.load() ? "dozing" : "idle";
         std::ofstream f(mind_dir_ + "/battery_log.jsonl", std::ios::app);
-        f << json{{"t", t}, {"v", std::round(b.volts * 1000) / 1000}, {"pct", chargePct(b)},
-                  {"level", b.level}, {"act", act}}.dump() << "\n";
+        json j = {{"t", t}, {"v", std::round(b.volts * 1000) / 1000}, {"pct", chargePct(b)}, {"level", b.level}, {"act", act}};
+        if (b.raw_volts > 0 && std::fabs(b.raw_volts - b.volts) > 0.001f) j["raw"] = std::round(b.raw_volts * 1000) / 1000;
+        f << j.dump() << "\n";
     }
     bool withBody(const std::function<bool()>& fn) {
         last_body_at_ = std::time(nullptr);

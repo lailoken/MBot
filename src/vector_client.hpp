@@ -82,6 +82,7 @@ public:
         bool cube_known = false; int cube_level = -1; float cube_volts = 0;  // cube: 0 low, 1 normal
         // Filled in by the brain from the robot's live state (the mic shim): volts is then the live reading.
         bool live = false; float sdk_volts = 0, temp_c = -1;
+        float raw_volts = 0;  // off the charger: the latest reading before the brain holds the lowest one
     };
     bool battery(Battery& out);  // level: 1 low, 2 nominal, 3 full
     bool versionInfo(std::string& out);
