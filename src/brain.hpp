@@ -18,6 +18,9 @@ struct BrainOptions {
     // as text; that text (never the image) goes to the interactive mind.
     std::string vision_url = "http://localhost:11434/v1";
     std::string vision_model = "minicpm-v";  // "" disables sight entirely
+    // Careful look (only when asked: "look carefully", "what can you read on my screen"): a high-res frame
+    // goes to this ONLINE model for detail and text reading. Costs a little per look; "" = local model only.
+    std::string detail_vision_model = "claude-sonnet-5-5";
     bool reflect_with_main = false;  // use the main (paid) mind for memory reflection
     // Mind for memory consolidation + dreams (what he immortalises). "" = the fast/local model;
     // e.g. "claude-sonnet-5-5" for careful Claude with thinking (local fallback).

@@ -116,6 +116,9 @@ Your body (actions run in order, before you speak):
               picture of me"); it's only kept if they're looking at you, otherwise you'll be told to ask them.
   pronounce: name = "Word=Respelling" to change how your voice says a word (e.g. "Siobhan=Shivawn")
   forget_person: name = someone you were told is not a real person
+  look_closely: name = what to look for/read - a careful, detailed look (sharp camera picture read by a strong
+              online model: small text, screens, labels, fine detail). Only when someone asks you to look
+              carefully/closely or to read something; it costs a little, so not for casual glances.
   cube_lights: flash the lights on your Light Cube (your toy; a small cube you can lift, roll and tap)
   play_with_cube: go and play with your cube (your body's own behavior; may need to be off the charger)
   go_to_charger / leave_charger
@@ -195,7 +198,7 @@ json replySchema() {
               {"properties",
                {{"type",
                  {{"type", "string"},
-                  {"enum", {"turn", "drive", "head", "lift", "anim", "look", "look_around",
+                  {"enum", {"turn", "drive", "head", "lift", "anim", "look", "look_closely", "look_around",
                             "learn_face", "pronounce", "forget_person", "rename_person",
                             "merge_person", "take_photo", "cube_lights", "play_with_cube", "go_to_charger",
                             "leave_charger", "sleep"}}}},
@@ -1625,9 +1628,12 @@ private:
         // Constant listening: respond when named, mid-conversation, or when someone is right in
         // front of him (face seen in the last 20 s) saying a real sentence. Otherwise just overhear.
         bool facing = !facesInView(20).empty() && words >= 2;
+        // Still the same chat: he answered someone in the last 2 minutes and this is a real sentence (he may
+        // have turned away to look at something they showed him, so no face in view).
+        bool recent_chat = Clock::now() - last_spoke_with_ < std::chrono::minutes(2) && words >= 3;
         bool continuing;
         { std::lock_guard<std::mutex> lk(speech_mu_); continuing = !speech_buf_.empty(); }
-        if (addressed || convo || facing || continuing || (opt_.listen_all && words >= 2)) {
+        if (addressed || convo || facing || continuing || recent_chat || (opt_.listen_all && words >= 2)) {
             SpeechDir d = noteVoiceDirection(h, addressed || convo || facing);
             std::lock_guard<std::mutex> lk(speech_mu_);
             if (d.ok && (!speech_dir_.ok || d.conf > speech_dir_.conf)) speech_dir_ = d;
@@ -2427,6 +2433,66 @@ private:
         return out;
     }
 
+    // "look carefully", "look closely", "what can you read", "read my screen", "what does it say"...
+    bool wantsCarefulLook(const Stimulus& s) {
+        if (careful_requested_.exchange(false)) return true;
+        if (s.kind != Stimulus::Speech && s.kind != Stimulus::Typed) return false;
+        static const std::regex re(
+            R"(\b(look|see|check)\w*\b[^.?!]{0,25}\b(careful|closely|close look|properly|in detail|zoom)|)"
+            R"(\b(close|careful|good|proper)\s+look\b|\bread\b[^.?!]{0,30}\b(this|that|it|my|the|on|screen|sign|label|text|says?)\b|)"
+            R"(\bdescribe\b|\bwhat('s| is) on (it|the|my|this)\b|\bwhat (does|do) (it|this|that|the \w+) say\b|\bcan you read\b|\bwhat('s| is) (written|on (my|the|this) (screen|monitor|display|page|phone)))",
+            std::regex::icase);
+        return std::regex_search(s.text, re);
+    }
+
+    // A careful look: a fresh high-resolution frame, read by a strong online model (detail, small text).
+    // Falls back to the local model if there's no online mind / budget left.
+    std::string carefulLook(const std::string& question, std::string* how) {
+        last_careful_ = Clock::now();
+        Image img;
+        std::string jpeg;
+        if (vec_.captureImage(img, true, 8) && img.isJpeg()) jpeg = img.data;
+        else {
+            std::lock_guard<std::mutex> lk(mu_);
+            if (!frame_.empty() && Clock::now() - frame_time_ < std::chrono::seconds(15)) jpeg = frame_;
+        }
+        if (jpeg.empty()) return "";
+        std::string prompt =
+            "You are the eyes of a small desk robot; this is what his camera sees right now. Someone asked him: \"" +
+            question + "\". Look carefully and report, factually and compactly (at most ~80 words): read any "
+            "legible text exactly as written (screens, labels, signs, books - say if it's too small or blurry to "
+            "read), and describe the details that matter for the question. No guessing names; say what you can't see.";
+        auto t0 = Clock::now();
+        if (claude_ok_ && !overBudget() && !opt_.detail_vision_model.empty()) {
+            if (!detail_eyes_) detail_eyes_ = makeClaudeBackend(opt_.detail_vision_model, "low");
+            json schema = {{"type", "object"},
+                           {"properties", {{"seen", {{"type", "string"}}}}},
+                           {"required", {"seen"}},
+                           {"additionalProperties", false}};
+            json out;
+            std::string err;
+            setCallReason("careful look: " + question.substr(0, 60));
+            if (detail_eyes_->complete("Answer only with the JSON object.", {{"user", prompt, jpeg}}, schema, out, &err)) {
+                std::string seen = out.value("seen", "");
+                if (!seen.empty()) {
+                    std::printf("[eyes %.1fs online %s, %zu KB] %s\n", std::chrono::duration<double>(Clock::now() - t0).count(),
+                                opt_.detail_vision_model.c_str(), jpeg.size() / 1024, seen.c_str());
+                    if (how) *how = "online";
+                    return seen;
+                }
+            }
+            std::fprintf(stderr, "[eyes] online careful look failed (%s) - using the local eyes\n", err.c_str());
+        }
+        if (opt_.vision_model.empty()) return "";
+        std::string verr;
+        std::string seen = describeImage(opt_.vision_url, opt_.vision_model, jpeg, prompt, &verr, 90);
+        if (!seen.empty()) {
+            std::printf("[eyes %.1fs local, careful] %s\n", std::chrono::duration<double>(Clock::now() - t0).count(), seen.c_str());
+            if (how) *how = "local";
+        }
+        return seen;
+    }
+
     bool wantsImage(const Stimulus& s) {
         if (look_requested_.exchange(false)) return true;
         // A face the robot can't name: take a (local, free) look so the mind can recognise them by how
@@ -2453,7 +2519,18 @@ private:
         // His eyes: when he needs to see, a LOCAL vision model describes the scene as text.
         // The image itself never reaches the interactive mind (free, token-light).
         std::string sceneDesc;
-        if (wantsImage(s) && !opt_.vision_model.empty()) {
+        if (wantsCarefulLook(s)) {
+            std::string how, q = careful_what_.empty() ? s.text : careful_what_ + " (" + s.text + ")";
+            careful_what_.clear();
+            std::string seen = carefulLook(q, &how);
+            if (!seen.empty()) {
+                noteSight(seen);
+                last_image_sent_ = Clock::now();
+                look_requested_ = false;
+                sceneDesc = "(a careful, close look" + std::string(how == "online" ? ", sharp" : "") + ") " + seen;
+            }
+        }
+        if (sceneDesc.empty() && wantsImage(s) && !opt_.vision_model.empty()) {
             std::string jpeg;
             {
                 std::lock_guard<std::mutex> lk(mu_);
@@ -2601,7 +2678,8 @@ private:
             mind_.knowPerson(who);
         }
         if (r.value("conversation", "end") == "continue")
-            convo_until_ = Clock::now() + std::chrono::seconds(25);
+            convo_until_ = Clock::now() + std::chrono::seconds(45);
+        if (s.kind == Stimulus::Speech || s.kind == Stimulus::Typed) last_spoke_with_ = Clock::now();
         if ((s.kind == Stimulus::Speech || s.kind == Stimulus::Typed) && isRealName(partner_)) {
             if (convo_person_ != partner_) { convo_person_ = partner_; convo_turns_ = 0; }
             ++convo_turns_;
@@ -2626,7 +2704,7 @@ private:
         std::string w = low(want);
         for (auto& a : anims_)
             if (low(a) == w) return a;
-        static const char* actionWords[] = {"turn", "drive", "head", "lift", "anim", "look", "look_around", "pronounce", "forget_person", "cube_lights", "play_with_cube",
+        static const char* actionWords[] = {"turn", "drive", "head", "lift", "anim", "look", "look_closely", "look_around", "pronounce", "forget_person", "cube_lights", "play_with_cube",
                                             "find_faces", "learn_face", "go_to_charger", "leave_charger", "sleep"};
         for (auto* aw : actionWords)
             if (w == aw) return {};
@@ -2696,7 +2774,7 @@ private:
             // is what browns him out.
             // learn_face is allowed too: a deliberate, occasional request from a person (someone asked to
             // be learned; blocking it left the mind believing it had learned his face).
-            if (brownout_safe_ && type != "look" && type != "pronounce" && type != "forget_person" &&
+            if (brownout_safe_ && type != "look" && type != "look_closely" && type != "pronounce" && type != "forget_person" &&
                 type != "go_to_charger" && type != "learn_face" && type != "take_photo" && type != "sleep") {
                 std::printf("[guard] battery safe-mode: skipping '%s' to conserve power\n", type.c_str());
                 {
@@ -2728,6 +2806,17 @@ private:
                     last_look_ = Clock::now();
                     look_requested_ = true;
                     push({Stimulus::Body, "You take a careful look with your camera. Take in what you see; only speak if it's worth saying to someone.", 4, true});
+                }
+            }
+            else if (type == "look_closely") {
+                if (Clock::now() - last_careful_ < std::chrono::seconds(20)) {
+                    std::printf("[act] (ignoring repeated careful look)\n");
+                } else {
+                    careful_what_ = name;
+                    careful_requested_ = true;
+                    push({Stimulus::Body, "You take a careful, close look with your camera" +
+                         (name.empty() ? std::string(".") : " (looking for: " + name + ").") +
+                         " Tell them what you can make out.", 4, true});
                 }
             }
             else if (type == "look_around") vec_.lookAround();
@@ -4290,6 +4379,11 @@ private:
     Clock::time_point last_level_beat_{};   // 5-minute ears heartbeat in the log
     std::atomic<bool> robot_up_{true}, robot_returned_{false};
     std::atomic<bool> look_requested_{false};
+    Clock::time_point last_spoke_with_{};              // last reply to someone's words
+    std::atomic<bool> careful_requested_{false};       // next think: a careful online look
+    std::string careful_what_;                          // what the mind wanted to look for
+    Clock::time_point last_careful_{};
+    std::unique_ptr<LlmBackend> detail_eyes_;           // online vision model for careful looks (lazy)
     int self_turns_ = 0;                 // consecutive robot-generated turns (loop guard)
     Clock::time_point last_look_{};      // cooldown for the look action
     std::string last_said_;              // suppress near-duplicate speech

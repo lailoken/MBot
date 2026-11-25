@@ -474,6 +474,7 @@ int main(int argc, char** argv) {
             else if (args[i] == "--input-fifo") o.input_fifo = next();
             else if (args[i] == "--vision-model") o.vision_model = next();
             else if (args[i] == "--no-vision") o.vision_model.clear();
+            else if (args[i] == "--detail-vision-model") o.detail_vision_model = next();
             else if (args[i] == "--tts") o.tts_cmd = next();
             else if (args[i] == "--idle") o.idle_sec = std::stoi(next());
             else if (args[i] == "--data") o.data_dir = next();
