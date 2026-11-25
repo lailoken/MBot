@@ -119,6 +119,10 @@ Your body (actions run in order, before you speak):
   look_closely: name = what to look for/read - a careful, detailed look (sharp camera picture read by a strong
               online model: small text, screens, labels, fine detail). Only when someone asks you to look
               carefully/closely or to read something; it costs a little, so not for casual glances.
+  look_up: name = a clear, self-contained search question - look something up on the internet when someone
+              asks about facts you don't reliably know: news, weather, sports, prices, opening hours, recent events,
+              or anything you'd only be guessing at. Say a short "let me look that up" in "say"; the answer comes
+              back to you a few seconds later and you then tell them. Not for chit-chat or things you know.
   cube_lights: flash the lights on your Light Cube (your toy; a small cube you can lift, roll and tap)
   play_with_cube: go and play with your cube (your body's own behavior; may need to be off the charger)
   go_to_charger / leave_charger
@@ -198,7 +202,7 @@ json replySchema() {
               {"properties",
                {{"type",
                  {{"type", "string"},
-                  {"enum", {"turn", "drive", "head", "lift", "anim", "look", "look_closely", "look_around",
+                  {"enum", {"turn", "drive", "head", "lift", "anim", "look", "look_closely", "look_up", "look_around",
                             "learn_face", "pronounce", "forget_person", "rename_person",
                             "merge_person", "take_photo", "cube_lights", "play_with_cube", "go_to_charger",
                             "leave_charger", "sleep"}}}},
@@ -374,11 +378,17 @@ public:
 
         // Fetch what's missing, the first time it's needed: local models (background), the speech model (now).
         {
-            std::vector<std::string> want = {opt_.vision_model, opt_.fast_model.empty() ? defaultLocalModel() : opt_.fast_model};
+            // His eyes may live on another machine (--vision-url); the text models live where the local mind is.
+            std::vector<std::string> want = {opt_.fast_model.empty() ? defaultLocalModel() : opt_.fast_model};
             if (!opt_.model.empty() && opt_.model.rfind("claude", 0) != 0) want.push_back(opt_.model);
             if (!opt_.reflect_model.empty() && opt_.reflect_model.rfind("claude", 0) != 0) want.push_back(opt_.reflect_model);
-            std::string url = opt_.vision_url;
-            std::thread([url, want] { ensureOllamaModels(url, want); }).detach();
+            const char* lm = std::getenv("MBOT_LOCAL_MIND");
+            std::string mind_url = lm ? lm : opt_.backend.rfind("http", 0) == 0 ? opt_.backend : "http://localhost:11434/v1";
+            std::string vurl = opt_.vision_url, vmodel = opt_.vision_model;
+            std::thread([mind_url, want, vurl, vmodel] {
+                if (!vmodel.empty()) ensureOllamaModels(vurl, {vmodel});
+                ensureOllamaModels(mind_url, want);
+            }).detach();
         }
         if (!opt_.whisper_model.empty()) ensureModelFile(opt_.whisper_model, "speech model");
         if (!opt_.whisper_model.empty()) {
@@ -2541,6 +2551,35 @@ private:
         return out;
     }
 
+    // Look something up online (in the background); the answer comes back to his mind as a new moment.
+    void lookUp(const std::string& query) {
+        if (query.empty()) return;
+        if (opt_.lookup_model.empty() || !claude_ok_ || overBudget()) {
+            push({Stimulus::Body, "You tried to look up \"" + query + "\" but you can't go online right now "
+                 "(no online mind or today's budget is spent). Say so honestly.", 4, true});
+            return;
+        }
+        if (looking_up_.exchange(true)) { std::printf("[web] (already looking something up)\n"); return; }
+        std::printf("[web] looking up: %s\n", query.c_str());
+        std::thread([this, query] {
+            auto t0 = Clock::now();
+            std::string err;
+            setCallReason("look up: " + query.substr(0, 80));
+            std::string ans = webLookup(opt_.lookup_model, query, &err);
+            double dt = std::chrono::duration<double>(Clock::now() - t0).count();
+            looking_up_ = false;
+            if (ans.empty()) {
+                std::fprintf(stderr, "[web] lookup failed (%.1fs): %s\n", dt, err.c_str());
+                push({Stimulus::Body, "You tried to look up \"" + query + "\" online but it didn't work. Tell them.", 4, true});
+                return;
+            }
+            std::printf("[web %.1fs] %s\n", dt, ans.c_str());
+            convo_until_ = Clock::now() + std::chrono::seconds(45);
+            push({Stimulus::Body, "You looked it up online (\"" + query + "\"). What you found: " + ans +
+                 " Now tell them the answer in your own words, briefly.", 5, true});
+        }).detach();
+    }
+
     // Debug view (hardware page): keep the last 10 pictures he looked at, with what he made of them.
     void saveSeen(const std::string& jpeg, const std::string& kind, const std::string& text, const std::string& by = "") {
         if (!opt_.save_eyes || jpeg.empty()) return;
@@ -2830,7 +2869,7 @@ private:
         std::string w = low(want);
         for (auto& a : anims_)
             if (low(a) == w) return a;
-        static const char* actionWords[] = {"turn", "drive", "head", "lift", "anim", "look", "look_closely", "look_around", "pronounce", "forget_person", "cube_lights", "play_with_cube",
+        static const char* actionWords[] = {"turn", "drive", "head", "lift", "anim", "look", "look_closely", "look_up", "look_around", "pronounce", "forget_person", "cube_lights", "play_with_cube",
                                             "find_faces", "learn_face", "go_to_charger", "leave_charger", "sleep"};
         for (auto* aw : actionWords)
             if (w == aw) return {};
@@ -2900,7 +2939,7 @@ private:
             // is what browns him out.
             // learn_face is allowed too: a deliberate, occasional request from a person (someone asked to
             // be learned; blocking it left the mind believing it had learned his face).
-            if (brownout_safe_ && type != "look" && type != "look_closely" && type != "pronounce" && type != "forget_person" &&
+            if (brownout_safe_ && type != "look" && type != "look_closely" && type != "look_up" && type != "pronounce" && type != "forget_person" &&
                 type != "go_to_charger" && type != "learn_face" && type != "take_photo" && type != "sleep") {
                 std::printf("[guard] battery safe-mode: skipping '%s' to conserve power\n", type.c_str());
                 {
@@ -2945,6 +2984,7 @@ private:
                          " Tell them what you can make out.", 4, true});
                 }
             }
+            else if (type == "look_up") lookUp(name);
             else if (type == "look_around") vec_.lookAround();
             else if (type == "cube_lights") vec_.flashCube();
             else if (type == "play_with_cube") play_cube_after_ = true;
@@ -4509,6 +4549,7 @@ private:
     Clock::time_point last_spoke_with_{};
     Clock::time_point last_check_{};
     std::atomic<bool> checking_{false}, want_glance_{false};              // last reply to someone's words
+    std::atomic<bool> looking_up_{false};
     std::atomic<int> seen_n_{int(std::time(nullptr) % 10)};
     std::atomic<bool> careful_requested_{false};       // next think: a careful online look
     std::string careful_what_;                          // what the mind wanted to look for

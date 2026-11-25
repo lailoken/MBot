@@ -13,6 +13,7 @@
 #include "brain.hpp"
 #include "config.hpp"
 #include "ears.hpp"
+#include "llm.hpp"
 #include "mind.hpp"
 #include "net.hpp"
 #include "tls_probe.hpp"
@@ -47,6 +48,7 @@ usage: mbot [-r ROBOT] <command> [args]
                           real spelling); --try speaks numbered variants to compare
   listen [--mic pc|tap|NAME]  print what the mic hears (tap = Vector's own mics)
   mind [--data DIR]       show the robot's personality, feelings, people, memories
+  lookup <question>       look something up on the web the way he does (Claude + web search)
   usage                   Claude API calls and cost per day (from claude_calls.log)
   people                  everyone the robot knows (household, birthdays, facts)
   person add NAME [--relation R] [--birthday YYYY-MM-DD] [--alias A] [--protect]
@@ -72,6 +74,13 @@ usage: mbot [-r ROBOT] <command> [args]
         --input-fifo PATH   also read typed lines from this named pipe (use with vtalk)
         --vision-model NAME local model that describes what he sees (default minicpm-v; free)
         --no-vision         blind mode (don't describe camera frames)
+        --vision-url URL    where the local vision model runs (default http://localhost:11434/v1);
+                            e.g. Ollama on another PC: http://192.168.1.20:11434/v1
+        --detail-vision-model M  online model for careful looks on request ("look carefully",
+                            "read my screen"); default claude-sonnet-5-5, "" = local only
+        --lookup-model M    model that looks things up on the web for him (default
+                            claude-haiku-5-5, about 1-2 cents a lookup; "" = never go online)
+        --save-eyes / --save-ears  keep his last 10 pictures / heard clips (hardware page)
         --tts CMD           external TTS; text on stdin, writes WAV to {out}
         --idle SEC          seconds of quiet before it considers doing something (120)
         --data DIR          where the mind lives (default ~/.local/share/mbot/<serial>)
@@ -236,6 +245,15 @@ int main(int argc, char** argv) {
         }
         usage();
         return 2;
+    }
+    if (cmd == "lookup") {  // test the web lookup he uses: mbot lookup "question"
+        if (args.empty()) { std::fprintf(stderr, "usage: mbot lookup \"question\"\n"); return 2; }
+        std::string q, err;
+        for (auto& a : args) q += (q.empty() ? "" : " ") + a;
+        std::string ans = mbot::webLookup(std::getenv("MBOT_LOOKUP_MODEL") ? std::getenv("MBOT_LOOKUP_MODEL") : "claude-haiku-5-5", q, &err);
+        if (ans.empty()) { std::fprintf(stderr, "lookup failed: %s\n", err.c_str()); return 1; }
+        std::printf("%s\n", ans.c_str());
+        return 0;
     }
     if (cmd == "usage") {
         RobotConfig rc;
@@ -476,6 +494,8 @@ int main(int argc, char** argv) {
             else if (args[i] == "--vision-model") o.vision_model = next();
             else if (args[i] == "--no-vision") o.vision_model.clear();
             else if (args[i] == "--detail-vision-model") o.detail_vision_model = next();
+            else if (args[i] == "--vision-url") o.vision_url = next();
+            else if (args[i] == "--lookup-model") o.lookup_model = next();
             else if (args[i] == "--tts") o.tts_cmd = next();
             else if (args[i] == "--idle") o.idle_sec = std::stoi(next());
             else if (args[i] == "--data") o.data_dir = next();

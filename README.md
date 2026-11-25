@@ -18,6 +18,7 @@ Everything about his mind is stored **locally** as plain files. Images never lea
 | **Hear constantly** | Raw audio from all 4 of his mics, before the firmware's wake-word gate (via a small on-robot shim, see `docs/ROBOT_MODIFICATIONS.md`) → voice-activity detection → local Whisper. He answers when you say his name, when you face him, or mid-conversation. Other speech becomes background context, and garbled noise never reaches the AI. |
 | **No wake-word jump** | Optionally the firmware hears silence, so "Hey Vector" no longer sets off its own wake reaction (useful with a weak battery: that sudden load can brown him out). |
 | **See** | Camera frames are described **locally** (e.g. `minicpm-v`); only the text goes to the mind. He recognises people by face (robot's recognizer) and by description ("that looks like Sam"). |
+| **Look closer, look things up** | On request ("look carefully", "what can you read on my screen") one sharp high-res picture goes to Claude for detail and text; when he needs a fact he doesn't know (news, weather, opening hours...) he looks it up on the web (Claude's web search, about 1-2 cents a lookup; `--lookup-model ""` turns it off). Try it: `mbot lookup "question"`. |
 | **Remember** | Episodic memories with importance, recalled by relevance; facts and affinity per person; an evolving life story. |
 | **People** | Sound-alike names are assumed to be someone he knows (speech-to-text mishears names); he renames, merges duplicates, forgets phantoms, and learns faces only after checking the person matches their description. |
 | **Sleep & dream** | When he dozes, voices he half-hears become dream fragments, and his memory consolidation writes a dream. Called by name, he wakes up. |
@@ -48,6 +49,12 @@ Everything about his mind is stored **locally** as plain files. Images never lea
 | His eyes (local vision model via Ollama) | works, several seconds per look | ~1-3 s (Ollama uses the GPU on its own) |
 | Free local mind (Ollama) | slow but works; Claude is the quick option | quick |
 | Direction of sound, voice recognition, memory | CPU (light) | same |
+
+**Small machines (e.g. a Raspberry Pi).** Untested, but the core is plain C++ and should build anywhere.
+With Claude as the mind, the host mostly moves audio and text: use `--whisper models/ggml-base.en.bin`
+(smaller, faster speech-to-text) and either run blind (`--no-vision`) or point his eyes at Ollama on another
+machine with `--vision-url http://OTHER-PC:11434/v1`. Local language models are impractical there, and the
+optional voice-recognition library is fetched for x86-64 only.
 
 ## Install
 

@@ -139,6 +139,9 @@ double recordUsage(const std::string& model, const json& u) {
     double pin, pout, pcr;
     prices(model, pin, pout, pcr);
     double usd = (in * pin + out * pout + cr * pcr + cw * pin * 2.0) / 1e6;  // 1h cache write = 2x input
+    // Server tools: web searches are billed per search ($10 per 1000).
+    if (u.contains("server_tool_use") && u["server_tool_use"].is_object())
+        usd += u["server_tool_use"].value("web_search_requests", 0L) * 0.01;
     std::lock_guard<std::mutex> lk(g_usage_mu);
     rollDayLocked();
     g_usage.calls++;
@@ -560,6 +563,73 @@ std::string describeImage(const std::string& base_url, const std::string& model,
         if (err) *err = std::string("bad vision response: ") + ex.what();
         return "";
     }
+}
+
+// Look something up on the web: Claude with Anthropic's server-side web search, answering in a few
+// spoken-style sentences. Billed (tokens + $0.01 per search); counted in the daily budget like any call.
+std::string webLookup(const std::string& model, const std::string& question, std::string* err) {
+    std::vector<std::pair<std::string, std::string>> headers = {{"anthropic-version", "2026-10-21"}};
+    if (const char* key = envOr("ANTHROPIC_API_KEY")) headers.push_back({"x-api-key", key});
+    else if (const char* tok = envOr("ANTHROPIC_AUTH_TOKEN")) {
+        headers.push_back({"Authorization", std::string("Bearer ") + tok});
+        headers.push_back({"anthropic-beta", "oauth-2025-04-20"});
+    } else {
+        if (err) *err = "no ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN in the environment";
+        return "";
+    }
+    std::string base = envOr("ANTHROPIC_BASE_URL") ? envOr("ANTHROPIC_BASE_URL") : "https://api.anthropic.com";
+    char date[32];
+    std::time_t now = std::time(nullptr);
+    std::strftime(date, sizeof date, "%Y-%m-%d", std::localtime(&now));
+    json messages = json::array({{{"role", "user"}, {"content", question}}});
+    json body = {{"model", model},
+                 {"max_tokens", 2048},
+                 {"system", std::string("You look things up for a small home robot who will say your answer out loud to "
+                                        "the person who asked. Today is ") + date + ". Search the web as needed, then "
+                                        "answer in at most 3 short plain sentences (no lists, no markdown, no URLs), "
+                                        "giving the key facts and, if it matters, how recent or certain they are."},
+                 // Dynamic filtering (20260209) exists on Sonnet/Opus 5.5 class models; Haiku uses the basic tool.
+                 {"tools", json::array({{{"type", model.rfind("claude-haiku", 0) == 0 ? "web_search_20250305" : "web_search_20260209"},
+                                         {"name", "web_search"}, {"max_uses", 2}}})},
+                 {"output_config", {{"effort", "low"}}}};
+    if (model.rfind("claude-sonnet-5-5", 0) == 0) body["thinking"] = {{"type", "between_tools"}};
+    else if (model.rfind("claude-haiku-5-5", 0) == 0) body["thinking"] = {{"type", "disabled"}};
+    for (int round = 0; round < 4; ++round) {
+        body["messages"] = messages;
+        auto r = httpPost(base + "/v1/messages", body.dump(), headers, 120);
+        if (!r.error.empty()) { if (err) *err = r.error; return ""; }
+        json resp;
+        try { resp = json::parse(r.body); } catch (...) {
+            if (err) *err = "HTTP " + std::to_string(r.status) + ": " + r.body.substr(0, 200);
+            return "";
+        }
+        if (r.status != 200) {
+            if (err) *err = "HTTP " + std::to_string(r.status) + ": " +
+                            resp.value("error", json::object()).value("message", r.body.substr(0, 200));
+            return "";
+        }
+        if (resp.contains("usage")) recordUsage(resp.value("model", model), resp["usage"]);
+        std::string stop = resp.value("stop_reason", "");
+        json content = resp.value("content", json::array());
+        if (stop == "pause_turn") {  // the server-side search loop wants another round: send it back as is
+            messages.push_back({{"role", "assistant"}, {"content", content}});
+            continue;
+        }
+        if (stop == "refusal") { if (err) *err = "declined"; return ""; }
+        // Only the final answer: text written after the last search ("Let me look that up..." is dropped).
+        std::string text;
+        for (auto& b : content) {
+            std::string ty = b.value("type", "");
+            if (ty == "text") text += b.value("text", "");
+            else if (ty == "server_tool_use" || ty.find("tool_result") != std::string::npos) text.clear();
+        }
+        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front()))) text.erase(0, 1);
+        while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back()))) text.pop_back();
+        if (text.empty() && err) *err = "no answer (stop_reason " + stop + ")";
+        return text;
+    }
+    if (err) *err = "search took too many rounds";
+    return "";
 }
 
 std::unique_ptr<LlmBackend> makeClaudeBackend(const std::string& model, const std::string& effort) {

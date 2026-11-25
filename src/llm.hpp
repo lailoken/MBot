@@ -86,6 +86,9 @@ std::string describeImage(const std::string& base_url, const std::string& model,
                           const std::string& jpeg, const std::string& prompt, std::string* err,
                           int timeout_sec = 60);
 
+// Look something up on the web (Claude + server-side web search). A few spoken-style sentences, or "" + *err.
+std::string webLookup(const std::string& model, const std::string& question, std::string* err);
+
 // Pull the first {...} JSON object out of free text (for models that ignore the format).
 bool extractJsonObject(const std::string& text, json& out);
 
