@@ -90,6 +90,8 @@ with a person on a personal level. Never narrate what you perceive or do ("I see
 closer look", "there's my cube", "let me look"): notice it in your thought and quietly carry on, like
 anyone would. Seeing a familiar face may earn a brief warm hello now and then, not a commentary.
 Use an empty "say" whenever you have nothing worth saying to someone. Don't greet an empty room.
+Don't comment on how the person in front of you looks (their beard, glasses, clothes) - they know what they
+look like. Appearance is for recognising people; mention it only when asked or when it matters.
 Do not repeat yourself; vary what you do. Avoid verbal tics: don't end replies with the same tag or
 refrain (look at your recent lines - if you already said you're unsure about someone, or mentioned the
 cube, don't say it again unless something new happened). Answer what was actually asked.
@@ -2037,9 +2039,20 @@ private:
                 } else if (!last_recognised_.empty() && now - last_recognised_at_ < std::chrono::seconds(10) &&
                            std::hypot(cx - last_recognised_c_[0], cy - last_recognised_c_[1]) < 160.f) {
                     who = last_recognised_;
+                } else if (!last_recognised_.empty() && now - last_recognised_at_ < std::chrono::minutes(10) &&
+                           now - two_faces_at_ > std::chrono::minutes(2)) {
+                    // Only one face at a time lately, and he recognised someone in the last 10 minutes: an "unknown"
+                    // face now is almost surely that same person at an odd angle - not a second visitor.
+                    who = last_recognised_;
                 } else if (now - last_recognised_at_ < std::chrono::seconds(30)) {
                     flicker_unknown = true;  // someone was just recognised: don't announce a "stranger" yet
                 }
+                // Two faces at the same moment, in different places: then there really are two people.
+                for (auto& [id, pc] : face_pos_)
+                    if (id != f.face_id() && now - pc.first < std::chrono::milliseconds(500) && std::fabs(pc.second - cx) > 120.f)
+                        two_faces_at_ = now;
+                face_pos_[f.face_id()] = {now, cx};
+                if (face_pos_.size() > 32) face_pos_.clear();
                 if (face_names_.size() > 64) face_names_.clear();
                 if (cam_fx_.load() > 0) {
                     std::lock_guard<std::mutex> lk2(seen_mu_);
@@ -2069,7 +2082,10 @@ private:
             }
             {
                 std::lock_guard<std::mutex> lk(mu_);
-                if (!who.empty()) faces_[who] = now;
+                if (!who.empty()) {
+                    faces_[who] = now;
+                    if (now - two_faces_at_ > std::chrono::minutes(2)) faces_.erase("someone unknown");  // that was them
+                }
                 else if (!flicker_unknown) faces_["someone unknown"] = now;
                 if (f.expression() > 1) last_expression_ = vpb::FacialExpression_Name(f.expression());
             }
@@ -2081,7 +2097,7 @@ private:
                 if (first_unknown_at_ == Clock::time_point{} || now - last_unknown_at_ > std::chrono::seconds(10))
                     first_unknown_at_ = now;
                 last_unknown_at_ = now;
-                if (flicker_unknown || now - first_unknown_at_ < std::chrono::seconds(4)) return;
+                if (flicker_unknown || now - first_unknown_at_ < std::chrono::seconds(8)) return;
             }
             // Someone he doesn't know, still here after a while: invite them to introduce themselves.
             if (who.empty() && now - first_unknown_at_ > std::chrono::seconds(20) &&
@@ -4792,7 +4808,8 @@ private:
     Clock::time_point open_offer_at_{};
     std::atomic<int> offer_replies_{0};
     std::atomic<bool> replying_{false};                 // thinking about an answer to someone's words
-    Clock::time_point last_tap_note_{}, last_motion_{};
+    Clock::time_point last_tap_note_{}, last_motion_{}, two_faces_at_{};
+    std::map<int, std::pair<Clock::time_point, float>> face_pos_;  // face id -> last seen, image x (guarded by mu_)
     std::atomic<int> seen_n_{0};
     std::atomic<bool> careful_requested_{false};       // next think: a careful online look
     std::string careful_what_;                          // what the mind wanted to look for
